@@ -1,3 +1,5 @@
+THIS REPOS IS A CLONE OF https://github.com/NVIDIA/semantic-segmentation. The changes here will be to test the network with `horovod` and `HeAT` to determine the effects of distributed optimizers on the training time.
+
 ### [Paper](https://arxiv.org/abs/2005.10821) | [YouTube](https://youtu.be/odAGA7pFBGA)  | [Cityscapes Score](https://www.cityscapes-dataset.com/method-details/?submissionID=7836) <br>
 
 Pytorch implementation of our paper [Hierarchical Multi-Scale Attention for Semantic Segmentation](https://arxiv.org/abs/2005.10821).<br>
