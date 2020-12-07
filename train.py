@@ -36,7 +36,6 @@ import sys
 import time
 import torch
 
-from apex import amp
 from runx.logx import logx
 from config import assert_and_infer_cfg, update_epoch, cfg
 from utils.misc import AverageMeter, prep_experiment, eval_metrics
@@ -47,20 +46,22 @@ from loss.optimizer import get_optimizer, restore_opt, restore_net
 
 import datasets
 import network
+import heat as ht
 
 
-# Import autoresume module
-sys.path.append(os.environ.get('SUBMIT_SCRIPTS', '.'))
-AutoResume = None
-try:
-    from userlib.auto_resume import AutoResume
-except ImportError:
-    print(AutoResume)
+# # Import autoresume module
+# sys.path.append(os.environ.get('SUBMIT_SCRIPTS', '.'))
+# AutoResume = None
+# try:
+#     from userlib.auto_resume import AutoResume
+# except ImportError:
+#     print(AutoResume)
 
 
 # Argument Parser
 parser = argparse.ArgumentParser(description='Semantic Segmentation')
 parser.add_argument('--lr', type=float, default=0.002)
+# default network is deepv3.DeepV3PlusW38 or deepv3.DeepV3PlusW38I
 parser.add_argument('--arch', type=str, default='deepv3.DeepWV3Plus',
                     help='Network architecture. We have DeepSRNX50V3PlusD (backbone: ResNeXt50) \
                     and deepWV3Plus (backbone: WideResNet38).')
@@ -104,15 +105,15 @@ parser.add_argument('--rescale', type=float, default=1.0,
 parser.add_argument('--repoly', type=float, default=1.5,
                     help='Warm Restart new poly exp')
 
-parser.add_argument('--apex', action='store_true', default=False,
-                    help='Use Nvidia Apex Distributed Data Parallel')
-parser.add_argument('--fp16', action='store_true', default=False,
-                    help='Use Nvidia Apex AMP')
+# parser.add_argument('--apex', action='store_true', default=False,
+#                     help='Use Nvidia Apex Distributed Data Parallel')
+# parser.add_argument('--fp16', action='store_true', default=False,
+#                     help='Use Nvidia Apex AMP')
 
-parser.add_argument('--local_rank', default=0, type=int,
-                    help='parameter used by apex library')
-parser.add_argument('--global_rank', default=0, type=int,
-                    help='parameter used by apex library')
+# parser.add_argument('--local_rank', default=0, type=int,
+#                     help='parameter used by apex library')
+# parser.add_argument('--global_rank', default=0, type=int,
+#                     help='parameter used by apex library')
 
 parser.add_argument('--optimizer', type=str, default='sgd', help='optimizer')
 parser.add_argument('--amsgrad', action='store_true', help='amsgrad for adam')
@@ -209,8 +210,8 @@ parser.add_argument('--mscale_lo_scale', type=float, default=0.5,
 parser.add_argument('--pre_size', type=int, default=None,
                     help=('resize long edge of images to this before'
                           ' augmentation'))
-parser.add_argument('--amp_opt_level', default='O1', type=str,
-                    help=('amp optimization level'))
+# parser.add_argument('--amp_opt_level', default='O1', type=str,
+#                     help=('amp optimization level'))
 parser.add_argument('--rand_augment', default=None,
                     help='RandAugment setting: set to \'N,M\'')
 parser.add_argument('--init_decoder', default=False, action='store_true',
@@ -281,53 +282,38 @@ if args.deterministic:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-args.world_size = 1
-
 # Test Mode run two epochs with a few iterations of training and val
 if args.test_mode:
     args.max_epoch = 2
 
-if 'WORLD_SIZE' in os.environ and args.apex:
-    # args.apex = int(os.environ['WORLD_SIZE']) > 1
-    args.world_size = int(os.environ['WORLD_SIZE'])
-    args.global_rank = int(os.environ['RANK'])
-
-if args.apex:
-    print('Global Rank: {} Local Rank: {}'.format(
-        args.global_rank, args.local_rank))
-    torch.cuda.set_device(args.local_rank)
-    torch.distributed.init_process_group(backend='nccl',
-                                         init_method='env://')
-
-
-def check_termination(epoch):
-    if AutoResume:
-        shouldterminate = AutoResume.termination_requested()
-        if shouldterminate:
-            if args.global_rank == 0:
-                progress = "Progress %d%% (epoch %d of %d)" % (
-                    (epoch * 100 / args.max_epoch),
-                    epoch,
-                    args.max_epoch
-                )
-                AutoResume.request_resume(
-                    user_dict={"RESUME_FILE": logx.save_ckpt_fn,
-                               "TENSORBOARD_DIR": args.result_dir,
-                               "EPOCH": str(epoch)
-                               }, message=progress)
-                return 1
-            else:
-                return 1
-    return 0
+args.world_size = ht.MPI_WORLD.size
+args.rank = rank = ht.MPI_WORLD.rank
 
 
 def main():
     """
     Main Function
     """
-    if AutoResume:
-        AutoResume.init()
-
+    # rank = args.rank
+    args.gpus = torch.cuda.device_count()
+    device = torch.device("cpu")
+    loc_dist = True if args.gpus > 1 else False
+    loc_rank = rank % args.gpus
+    args.gpu = loc_rank
+    args.local_rank = loc_rank
+    if loc_dist:
+        device = "cuda:" + str(loc_rank)
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "29500"
+        os.environ["NCCL_SOCKET_IFNAME"] = "ib"
+        torch.distributed.init_process_group(backend="nccl", rank=loc_rank, world_size=args.gpus)
+        torch.cuda.set_device(device)
+    elif args.gpus == 1:
+        args.gpus = torch.cuda.device_count()
+        device = "cuda:0"
+        args.local_rank = 0
+        torch.cuda.set_device(device)
+    # todo: define results dir
     assert args.result_dir is not None, 'need to define result_dir arg'
     logx.initialize(logdir=args.result_dir,
                     tensorboard=True, hparams=vars(args),
@@ -336,55 +322,47 @@ def main():
     # Set up the Arguments, Tensorboard Writer, Dataloader, Loss Fn, Optimizer
     assert_and_infer_cfg(args)
     prep_experiment(args)
+    # todo: HeAT fixes -- urgent -- need to change the dataloaders
     train_loader, val_loader, train_obj = \
         datasets.setup_loaders(args)
     criterion, criterion_val = get_loss(args)
 
-    auto_resume_details = None
-    if AutoResume:
-        auto_resume_details = AutoResume.get_resume_details()
-
-    if auto_resume_details:
-        checkpoint_fn = auto_resume_details.get("RESUME_FILE", None)
-        checkpoint = torch.load(checkpoint_fn,
-                                map_location=torch.device('cpu'))
-        args.result_dir = auto_resume_details.get("TENSORBOARD_DIR", None)
-        args.start_epoch = int(auto_resume_details.get("EPOCH", None)) + 1
-        args.restore_net = True
-        args.restore_optimizer = True
-        msg = ("Found details of a requested auto-resume: checkpoint={}"
-               " tensorboard={} at epoch {}")
-        logx.msg(msg.format(checkpoint_fn, args.result_dir,
-                            args.start_epoch))
-    elif args.resume:
+    if args.resume:
         checkpoint = torch.load(args.resume,
                                 map_location=torch.device('cpu'))
         args.arch = checkpoint['arch']
         args.start_epoch = int(checkpoint['epoch']) + 1
         args.restore_net = True
         args.restore_optimizer = True
-        msg = "Resuming from: checkpoint={}, epoch {}, arch {}"
-        logx.msg(msg.format(args.resume, args.start_epoch, args.arch))
+        logx.msg(f"Resuming from: checkpoint={args.resume}, " \
+                 f"epoch {args.start_epoch}, arch {args.arch}")
     elif args.snapshot:
         if 'ASSETS_PATH' in args.snapshot:
             args.snapshot = args.snapshot.replace('ASSETS_PATH', cfg.ASSETS_PATH)
         checkpoint = torch.load(args.snapshot,
                                 map_location=torch.device('cpu'))
         args.restore_net = True
-        msg = "Loading weights from: checkpoint={}".format(args.snapshot)
-        logx.msg(msg)
+        logx.msg(f"Loading weights from: checkpoint={args.snapshot}")
 
+    # todo: HeAT fixes -- urgent -- DDDP / optim / scheduler
     net = network.get_net(args, criterion)
+    net = net.to(device)
+
+    # todo: optim -> direct wrap after this, scheduler stays the same?
     optim, scheduler = get_optimizer(args, net)
 
-    if args.fp16:
-        net, optim = amp.initialize(net, optim, opt_level=args.amp_opt_level)
+    # todo: find the loss floor
+    # no scheduler for this optimizer!
+    # the scheduler in this code is only run at the end of each epoch
+    dp_optim = ht.optim.SkipBatches(local_optimizer=optim, loss_floor=1.0)
+    htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim)
 
-    net = network.wrap_network_in_dataparallel(net, args.apex)
+    # this is where the network is wrapped with DDDP (w/apex) or DP
+    # net = network.wrap_network_in_dataparallel(net, args.apex)
 
     if args.summary:
         print(str(net))
-        from pytorchOpCounter.thop import profile
+        from thop import profile
         img = torch.randn(1, 3, 1024, 2048).cuda()
         mask = torch.randn(1, 1, 1024, 2048).cuda()
         macs, params = profile(net, inputs={'images': img, 'gts': mask})
@@ -409,8 +387,8 @@ def main():
     #  --eval val --dump_assets             dump all images and assets
     #  --eval folder                        just dump all basic images
     #  --eval folder --dump_assets          dump all images and assets
+    # todo: HeAT fixes -- not urgent --
     if args.eval == 'val':
-
         if args.dump_topn:
             validate_topn(val_loader, net, criterion_val, optim, 0, args)
         else:
@@ -429,37 +407,28 @@ def main():
         raise 'unknown eval option {}'.format(args.eval)
 
     for epoch in range(args.start_epoch, args.max_epoch):
+        # todo: HeAT fixes -- possible conflict between processes
         update_epoch(epoch)
 
-        if args.only_coarse:
+        if args.only_coarse:  # default: false
             train_obj.only_coarse()
             train_obj.build_epoch()
-            if args.apex:
-                train_loader.sampler.set_num_samples()
-
         elif args.class_uniform_pct:
             if epoch >= args.max_cu_epoch:
                 train_obj.disable_coarse()
                 train_obj.build_epoch()
-                if args.apex:
-                    train_loader.sampler.set_num_samples()
             else:
                 train_obj.build_epoch()
         else:
             pass
 
-        train(train_loader, net, optim, epoch)
-
-        if args.apex:
-            train_loader.sampler.set_epoch(epoch + 1)
+        ls = train(train_loader, htnet, dp_optim, epoch)
+        dp_optim.epoch_loss_logic(ls, args.epochs)
 
         if epoch % args.val_freq == 0:
-            validate(val_loader, net, criterion_val, optim, epoch)
+            validate(val_loader, htnet, criterion_val, dp_optim, epoch)
 
         scheduler.step()
-
-        if check_termination(epoch):
-            return 0
 
 
 def train(train_loader, net, optim, curr_epoch):
@@ -490,21 +459,15 @@ def train(train_loader, net, optim, curr_epoch):
         optim.zero_grad()
         main_loss = net(inputs)
 
-        if args.apex:
-            log_main_loss = main_loss.clone().detach_()
-            torch.distributed.all_reduce(log_main_loss,
-                                         torch.distributed.ReduceOp.SUM)
-            log_main_loss = log_main_loss / args.world_size
-        else:
-            main_loss = main_loss.mean()
-            log_main_loss = main_loss.clone().detach_()
+        main_loss = main_loss.mean()
+        log_main_loss = main_loss.clone().detach_()
 
         train_main_loss.update(log_main_loss.item(), batch_pixel_size)
-        if args.fp16:
-            with amp.scale_loss(main_loss, optim) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            main_loss.backward()
+        # if args.fp16:
+        #     with amp.scale_loss(main_loss, optim) as scaled_loss:
+        #         scaled_loss.backward()
+        # else:
+        main_loss.backward()
 
         optim.step()
 
@@ -531,6 +494,7 @@ def train(train_loader, net, optim, curr_epoch):
             del data, inputs, gts
             return
         del data
+    return train_main_loss.avg
 
 
 def validate(val_loader, net, criterion, optim, epoch,

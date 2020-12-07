@@ -158,6 +158,7 @@ def setup_loaders(args):
 
     update_dataset_inst(dataset_inst=val_set)
 
+    # todo: HeAT fixes -- urgent -- : HeAT sampler
     if args.apex:
         from datasets.sampler import DistributedSampler
         val_sampler = DistributedSampler(val_set, pad=False, permutation=False,
@@ -181,6 +182,7 @@ def setup_loaders(args):
             img_transform=train_input_transform,
             label_transform=target_train_transform)
 
+        # todo: HeAT fixes -- urgent -- : change to HeAT samplers
         if args.apex:
             from datasets.sampler import DistributedSampler
             train_sampler = DistributedSampler(train_set, pad=True,

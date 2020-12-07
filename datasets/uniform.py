@@ -301,6 +301,7 @@ def build_epoch(imgs, centroids, num_classes, train):
     class_uniform_count = num_per_class * num_classes
     num_rand = num_epoch - class_uniform_count
     # create random crops
+    # todo: HeAT fixes -- urgent -- : split this between the number of nodes???
     imgs_uniform = random_sampling(imgs, num_rand)
 
     # now add uniform sampling
