@@ -48,6 +48,8 @@ from loss.optimizer import get_optimizer, restore_opt, restore_net
 import datasets
 import network
 
+import heat as ht
+
 
 # Import autoresume module
 sys.path.append(os.environ.get('SUBMIT_SCRIPTS', '.'))
@@ -293,11 +295,26 @@ if 'WORLD_SIZE' in os.environ and args.apex:
     args.global_rank = int(os.environ['RANK'])
 
 if args.apex:
-    print('Global Rank: {} Local Rank: {}'.format(
-        args.global_rank, args.local_rank))
-    torch.cuda.set_device(args.local_rank)
-    torch.distributed.init_process_group(backend='nccl',
-                                         init_method='env://')
+    # print('Global Rank: {} Local Rank: {}'.format(
+    #     args.global_rank, args.local_rank))
+    # torch.cuda.set_device(args.local_rank)
+    # torch.distributed.init_process_group(backend='nccl',
+    #                                      init_method='env://')
+    args.gpus = torch.cuda.device_count()
+    device = torch.device("cpu")
+    loc_dist = True if args.gpus > 1 else False
+    rank = ht.MPI_WORLD.rank
+    loc_rank = rank % args.gpus
+    args.gpu = loc_rank
+    args.local_rank = loc_rank
+    args.global_rank = loc_rank
+    # NOTE: this assumes only 1 node
+    device = "cuda:" + str(loc_rank)
+    torch.cuda.set_device(device)
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "29500"
+    os.environ["NCCL_SOCKET_IFNAME"] = "ib"
+    torch.distributed.init_process_group(backend="nccl", rank=loc_rank, world_size=args.gpus)
 
 
 def check_termination(epoch):
