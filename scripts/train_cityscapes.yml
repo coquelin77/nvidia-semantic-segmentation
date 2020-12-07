@@ -2,7 +2,7 @@
 # Requires 32GB GPU
 # Adjust nproc_per_node according to how many GPUs you have
 
-CMD: "python -m torch.distributed.launch --nproc_per_node=8 train.py"
+CMD: "python -u /p/project/haf/users/coquelin1/nvidia-citys/nvidia-semantic-segmentation/train.py"
 
 HPARAMS: [
   {

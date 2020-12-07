@@ -77,7 +77,7 @@ __C.DATASET = AttrDict()
 # Cityscapes Dir Location
 __C.DATASET.CITYSCAPES_DIR = "/p/project/haf/users/coquelin1/nvidia-citys/citys-data/"
 # os.path.join(__C.ASSETS_PATH, 'data/Cityscapes')
-__C.DATASET.CITYSCAPES_CUSTOMCOARSE = "/p/project/haf/users/coquelin1/nvidia-citys/citys-data/"
+__C.DATASET.CITYSCAPES_CUSTOMCOARSE = "/p/project/haf/users/coquelin1/nvidia-citys/citys-data/leftImg8bit_trainextra/"
 # os.path.join(__C.ASSETS_PATH, 'data/Cityscapes/autolabelled')
 __C.DATASET.CENTROID_ROOT = \
   os.path.join(__C.ASSETS_PATH, 'uniform_centroids')
