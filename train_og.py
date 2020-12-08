@@ -47,6 +47,7 @@ from loss.optimizer import get_optimizer, restore_opt, restore_net
 
 import datasets
 import network
+import time
 
 import heat as ht
 
@@ -342,6 +343,7 @@ def main():
     """
     Main Function
     """
+    t_start = time.perf_counter()
     if AutoResume:
         AutoResume.init()
 
@@ -353,8 +355,7 @@ def main():
     # Set up the Arguments, Tensorboard Writer, Dataloader, Loss Fn, Optimizer
     assert_and_infer_cfg(args)
     prep_experiment(args)
-    train_loader, val_loader, train_obj = \
-        datasets.setup_loaders(args)
+    train_loader, val_loader, train_obj = datasets.setup_loaders(args)
     criterion, criterion_val = get_loss(args)
 
     auto_resume_details = None
@@ -363,8 +364,8 @@ def main():
 
     if auto_resume_details:
         checkpoint_fn = auto_resume_details.get("RESUME_FILE", None)
-        checkpoint = torch.load(checkpoint_fn,
-                                map_location=torch.device('cpu'))
+        checkpoint = torch.load(checkpoint_fn, map_location=torch.device('cpu'))
+
         args.result_dir = auto_resume_details.get("TENSORBOARD_DIR", None)
         args.start_epoch = int(auto_resume_details.get("EPOCH", None)) + 1
         args.restore_net = True
@@ -401,7 +402,7 @@ def main():
 
     if args.summary:
         print(str(net))
-        from pytorchOpCounter.thop import profile
+        from thop import profile
         img = torch.randn(1, 3, 1024, 2048).cuda()
         mask = torch.randn(1, 1, 1024, 2048).cuda()
         macs, params = profile(net, inputs={'images': img, 'gts': mask})
@@ -445,6 +446,7 @@ def main():
     elif args.eval is not None:
         raise 'unknown eval option {}'.format(args.eval)
 
+    t_before_epoch_loop = time.perf_counter()
     for epoch in range(args.start_epoch, args.max_epoch):
         update_epoch(epoch)
 
@@ -477,6 +479,9 @@ def main():
 
         if check_termination(epoch):
             return 0
+
+    print(f"Time from start {time.perf_counter() - t_start}, "
+          f"time from loop start {time.perf_counter() - t_before_epoch_loop}")
 
 
 def train(train_loader, net, optim, curr_epoch):
