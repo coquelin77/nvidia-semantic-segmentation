@@ -163,6 +163,16 @@ def setup_loaders(args):
         from datasets.sampler import DistributedSampler
         val_sampler = DistributedSampler(val_set, pad=False, permutation=False,
                                          consecutive_sample=False)
+    elif args.heat:
+        from datasets.sampler import DistributedSampler
+        val_sampler = DistributedSampler(
+            val_set,
+            pad=False,
+            permutation=False,
+            consecutive_sample=False,
+            num_replicas=args.world_size,
+            rank=args.rank,
+        )
     else:
         val_sampler = None
 
@@ -188,6 +198,17 @@ def setup_loaders(args):
             train_sampler = DistributedSampler(train_set, pad=True,
                                                permutation=True,
                                                consecutive_sample=False)
+            train_batch_size = args.bs_trn
+        elif args.heat:
+            from datasets.sampler import DistributedSampler
+            train_sampler = DistributedSampler(
+                train_set,
+                pad=True,
+                permutation=True,
+                consecutive_sample=False,
+                num_replicas=args.world_size,
+                rank=args.rank,
+            )
             train_batch_size = args.bs_trn
         else:
             train_sampler = None

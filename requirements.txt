@@ -2,4 +2,12 @@ pyyaml>=5.1.1
 coolname>=1.1.0
 tabulate>=0.8.3
 tensorboardX>=1.4
-runx==0.0.6
+runx~=0.0.10
+
+numpy~=1.19.2
+torchvision~=0.8.1
+pillow~=8.0.1
+tqdm~=4.54.0
+scipy~=1.5.2
+heat~=0.5.1
+thop

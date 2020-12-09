@@ -69,7 +69,7 @@ parser.add_argument('--dataset', type=str, default='cityscapes',
                     help='cityscapes, mapillary, camvid, kitti')
 parser.add_argument('--dataset_inst', default=None,
                     help='placeholder for dataset instance')
-parser.add_argument('--num_workers', type=int, default=4,
+parser.add_argument('--num_workers', type=int, default=6,
                     help='cpu worker threads per dataloader instance')
 
 parser.add_argument('--cv', type=int, default=0,
@@ -105,15 +105,8 @@ parser.add_argument('--rescale', type=float, default=1.0,
 parser.add_argument('--repoly', type=float, default=1.5,
                     help='Warm Restart new poly exp')
 
-# parser.add_argument('--apex', action='store_true', default=False,
-#                     help='Use Nvidia Apex Distributed Data Parallel')
-# parser.add_argument('--fp16', action='store_true', default=False,
-#                     help='Use Nvidia Apex AMP')
-
-# parser.add_argument('--local_rank', default=0, type=int,
-#                     help='parameter used by apex library')
-# parser.add_argument('--global_rank', default=0, type=int,
-#                     help='parameter used by apex library')
+parser.add_argument('--fp16', action='store_true', default=False,
+                    help='use BFloat16 as the base datatype for the network')
 
 parser.add_argument('--optimizer', type=str, default='sgd', help='optimizer')
 parser.add_argument('--amsgrad', action='store_true', help='amsgrad for adam')
@@ -163,7 +156,7 @@ parser.add_argument('--restore_optimizer', action='store_true', default=False)
 parser.add_argument('--restore_net', action='store_true', default=False)
 parser.add_argument('--exp', type=str, default='default',
                     help='experiment directory name')
-parser.add_argument('--result_dir', type=str, default='./logs',
+parser.add_argument('--result_dir', type=str, default='./logs-dist',
                     help='where to write log output')
 parser.add_argument('--syncbn', action='store_true', default=False,
                     help='Use Synchronized BN')
@@ -286,8 +279,15 @@ if args.deterministic:
 if args.test_mode:
     args.max_epoch = 2
 
+args.heat = True
 args.world_size = ht.MPI_WORLD.size
 args.rank = rank = ht.MPI_WORLD.rank
+args.apex = False
+
+
+def print0(*args, **kwargs):
+    if args.rank == 0:
+        print(*args, **kwargs)
 
 
 def main():
@@ -313,7 +313,7 @@ def main():
         device = "cuda:0"
         args.local_rank = 0
         torch.cuda.set_device(device)
-    # todo: define results dir
+
     assert args.result_dir is not None, 'need to define result_dir arg'
     logx.initialize(logdir=args.result_dir,
                     tensorboard=True, hparams=vars(args),
@@ -322,9 +322,10 @@ def main():
     # Set up the Arguments, Tensorboard Writer, Dataloader, Loss Fn, Optimizer
     assert_and_infer_cfg(args)
     prep_experiment(args)
-    # todo: HeAT fixes -- urgent -- need to change the dataloaders
-    train_loader, val_loader, train_obj = \
-        datasets.setup_loaders(args)
+    #     args.ngpu = torch.cuda.device_count()
+    #     args.best_record = {'mean_iu': -1, 'epoch': 0}
+
+    train_loader, val_loader, train_obj = datasets.setup_loaders(args)
     criterion, criterion_val = get_loss(args)
 
     if args.resume:
@@ -351,10 +352,9 @@ def main():
     # todo: optim -> direct wrap after this, scheduler stays the same?
     optim, scheduler = get_optimizer(args, net)
 
-    # todo: find the loss floor
     # no scheduler for this optimizer!
     # the scheduler in this code is only run at the end of each epoch
-    dp_optim = ht.optim.SkipBatches(local_optimizer=optim, loss_floor=1.0)
+    dp_optim = ht.optim.SkipBatches(local_optimizer=optim)
     htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim)
 
     # this is where the network is wrapped with DDDP (w/apex) or DP
@@ -366,7 +366,7 @@ def main():
         img = torch.randn(1, 3, 1024, 2048).cuda()
         mask = torch.randn(1, 1, 1024, 2048).cuda()
         macs, params = profile(net, inputs={'images': img, 'gts': mask})
-        print(f'macs {macs} params {params}')
+        print0(f'macs {macs} params {params}')
         sys.exit()
 
     if args.restore_optimizer:
