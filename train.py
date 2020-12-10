@@ -263,6 +263,10 @@ parser.add_argument('--supervised_mscale_loss_wt', type=float, default=None,
 parser.add_argument('--ocr_aux_loss_rmi', action='store_true', default=False,
                     help='allow rmi for aux loss')
 
+parser.add_argument("--heat", action="store_true", default=True, help="use HeAT")
+parser.add_argument('--apex', action='store_true', default=False,
+                    help='Use Nvidia Apex Distributed Data Parallel')
+
 
 args = parser.parse_args()
 args.best_record = {'epoch': -1, 'iter': 0, 'val_loss': 1e10, 'acc': 0,
@@ -281,9 +285,10 @@ if args.test_mode:
 
 args.heat = True
 args.world_size = ht.MPI_WORLD.size
-args.rank = ht.MPI_WORLD.rank
+args.rank = rank = ht.MPI_WORLD.rank
 args.global_rank = args.rank
-args.apex = False
+if args.apex:
+    from apex import amp
 
 
 def print0(*args, **kwargs):
@@ -353,10 +358,13 @@ def main():
     # todo: optim -> direct wrap after this, scheduler stays the same?
     optim, scheduler = get_optimizer(args, net)
 
+    if args.fp16:
+        net, optim = amp.initialize(net, optim, opt_level=args.amp_opt_level)
+
     # no scheduler for this optimizer!
     # the scheduler in this code is only run at the end of each epoch
     dp_optim = ht.optim.SkipBatches(local_optimizer=optim)
-    htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim)
+    htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim, use_apex=args.amp)
 
     # this is where the network is wrapped with DDDP (w/apex) or DP
     # net = network.wrap_network_in_dataparallel(net, args.apex)
@@ -465,11 +473,11 @@ def train(train_loader, net, optim, curr_epoch):
         log_main_loss = main_loss.clone().detach_()
 
         train_main_loss.update(log_main_loss.item(), batch_pixel_size)
-        # if args.fp16:
-        #     with amp.scale_loss(main_loss, optim) as scaled_loss:
-        #         scaled_loss.backward()
-        # else:
-        main_loss.backward()
+        if args.amp:
+            with amp.scale_loss(main_loss, optim) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            main_loss.backward()
 
         optim.step()
 

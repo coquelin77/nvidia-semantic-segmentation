@@ -11,3 +11,5 @@ tqdm~=4.54.0
 scipy~=1.5.2
 heat~=0.5.1
 thop
+apex
+scikit-image
