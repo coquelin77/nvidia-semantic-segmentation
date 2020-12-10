@@ -281,7 +281,8 @@ if args.test_mode:
 
 args.heat = True
 args.world_size = ht.MPI_WORLD.size
-args.rank = rank = ht.MPI_WORLD.rank
+args.rank = ht.MPI_WORLD.rank
+args.global_rank = args.rank
 args.apex = False
 
 
@@ -294,7 +295,7 @@ def main():
     """
     Main Function
     """
-    # rank = args.rank
+    rank = args.rank
     args.gpus = torch.cuda.device_count()
     device = torch.device("cpu")
     loc_dist = True if args.gpus > 1 else False
@@ -304,7 +305,7 @@ def main():
     if loc_dist:
         device = "cuda:" + str(loc_rank)
         os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "29500"
+        os.environ["MASTER_PORT"] = "19500"
         os.environ["NCCL_SOCKET_IFNAME"] = "ib"
         torch.distributed.init_process_group(backend="nccl", rank=loc_rank, world_size=args.gpus)
         torch.cuda.set_device(device)
@@ -445,8 +446,9 @@ def train(train_loader, net, optim, curr_epoch):
     train_main_loss = AverageMeter()
     start_time = None
     warmup_iter = 10
-
+    optim.last_batch = len(train_loader) - 1
     for i, data in enumerate(train_loader):
+        #print(i, "start training loop")
         if i <= warmup_iter:
             start_time = time.time()
         # inputs = (bs,3,713,713)
@@ -482,11 +484,11 @@ def train(train_loader, net, optim, curr_epoch):
                ' [lr {:0.6f}] [batchtime {:0.3g}]')
         msg = msg.format(
             curr_epoch, i + 1, len(train_loader), train_main_loss.avg,
-            optim.param_groups[-1]['lr'], batchtime)
+            optim.lcl_optimizer.param_groups[-1]['lr'], batchtime)
         logx.msg(msg)
 
         metrics = {'loss': train_main_loss.avg,
-                   'lr': optim.param_groups[-1]['lr']}
+                   'lr': optim.lcl_optimizer.param_groups[-1]['lr']}
         curr_iter = curr_epoch * len(train_loader) + i
         logx.metric('train', metrics, curr_iter)
 

@@ -218,6 +218,9 @@ def assert_and_infer_cfg(args, make_immutable=True, train_mode=True):
             import apex
             __C.MODEL.BN = 'apex-syncnorm'
             __C.MODEL.BNFUNC = apex.parallel.SyncBatchNorm
+        elif args.heat:
+            __C.MODEL.BN = 'torch-syncnorm'
+            __C.MODEL.BNFUNC = torch.nn.SyncBatchNorm
         else:
             raise Exception('No Support for SyncBN without Apex')
     else:

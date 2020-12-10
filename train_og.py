@@ -285,6 +285,7 @@ if args.deterministic:
     torch.backends.cudnn.benchmark = False
 
 args.world_size = 1
+args.heat = False
 
 # Test Mode run two epochs with a few iterations of training and val
 if args.test_mode:
