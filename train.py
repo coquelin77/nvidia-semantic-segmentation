@@ -265,8 +265,6 @@ parser.add_argument('--ocr_aux_loss_rmi', action='store_true', default=False,
                     help='allow rmi for aux loss')
 
 parser.add_argument("--heat", action="store_true", default=True, help="use HeAT")
-parser.add_argument('--apex', action='store_true', default=False,
-                    help='Use Nvidia Apex Distributed Data Parallel')
 
 
 args = parser.parse_args()
@@ -288,7 +286,7 @@ args.heat = True
 args.world_size = ht.MPI_WORLD.size
 args.rank = rank = ht.MPI_WORLD.rank
 args.global_rank = args.rank
-args.apes = False
+args.apex = False
 
 
 def print0(*args, **kwargs):
@@ -442,7 +440,7 @@ def main():
         scheduler.step()
 
 
-def train(train_loader, net, optim, curr_epoch):
+def train(train_loader, net, optim, curr_epoch, scaler):
     """
     Runs the training loop per epoch
     train_loader: Data loader for train
@@ -469,18 +467,21 @@ def train(train_loader, net, optim, curr_epoch):
         inputs = {'images': images, 'gts': gts}
 
         optim.zero_grad()
-        main_loss = net(inputs)
-
-        main_loss = main_loss.mean()
-        log_main_loss = main_loss.clone().detach_()
-
-        train_main_loss.update(log_main_loss.item(), batch_pixel_size)
         if args.amp:
-            with amp.scale_loss(main_loss, optim) as scaled_loss:
-                scaled_loss.backward()
+            with amp.autocast():
+                main_loss = net(inputs)
+                main_loss = main_loss.mean()
+                log_main_loss = main_loss.clone().detach_()
+                train_main_loss.update(log_main_loss.item(), batch_pixel_size)
+            scaler.scale(main_loss).backwards()
         else:
+            main_loss = net(inputs)
+            main_loss = main_loss.mean()
+            log_main_loss = main_loss.clone().detach_()
+            train_main_loss.update(log_main_loss.item(), batch_pixel_size)
             main_loss.backward()
 
+        # the scaler update is within the optim step
         optim.step()
 
         if i >= warmup_iter:
