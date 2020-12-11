@@ -363,7 +363,7 @@ def main():
 
     # no scheduler for this optimizer!
     # the scheduler in this code is only run at the end of each epoch
-    dp_optim = ht.optim.SkipBatches(local_optimizer=optim)
+    dp_optim = ht.optim.SkipBatches(local_optimizer=optim, total_epochs=args.max_epoch)
     # this is where the network is wrapped with DDDP (w/apex) or DP
     htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim)
 
@@ -434,7 +434,7 @@ def main():
             pass
 
         ls = train(train_loader, htnet, dp_optim, epoch, scaler)
-        dp_optim.epoch_loss_logic(ls, args.epochs)
+        dp_optim.epoch_loss_logic(ls)
 
         if epoch % args.val_freq == 0:
             validate(val_loader, htnet, criterion_val, dp_optim, epoch)
