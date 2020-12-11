@@ -364,10 +364,8 @@ def main():
     # no scheduler for this optimizer!
     # the scheduler in this code is only run at the end of each epoch
     dp_optim = ht.optim.SkipBatches(local_optimizer=optim)
-    htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim, use_apex=args.amp)
-
     # this is where the network is wrapped with DDDP (w/apex) or DP
-    # net = network.wrap_network_in_dataparallel(net, args.apex)
+    htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim, use_apex=args.amp)
 
     if args.summary:
         print(str(net))
