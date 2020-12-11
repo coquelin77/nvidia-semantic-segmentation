@@ -46,6 +46,7 @@ from loss.optimizer import get_optimizer, restore_opt, restore_net
 
 import datasets
 import network
+import torch.cuda.amp as amp
 import heat as ht
 
 
@@ -287,8 +288,7 @@ args.heat = True
 args.world_size = ht.MPI_WORLD.size
 args.rank = rank = ht.MPI_WORLD.rank
 args.global_rank = args.rank
-if args.apex:
-    from apex import amp
+args.apes = False
 
 
 def print0(*args, **kwargs):
@@ -358,14 +358,14 @@ def main():
     # todo: optim -> direct wrap after this, scheduler stays the same?
     optim, scheduler = get_optimizer(args, net)
 
-    if args.fp16:
-        net, optim = amp.initialize(net, optim, opt_level=args.amp_opt_level)
+    # if args.fp16:
+    #     net, optim = amp.initialize(net, optim, opt_level=args.amp_opt_level)
 
     # no scheduler for this optimizer!
     # the scheduler in this code is only run at the end of each epoch
     dp_optim = ht.optim.SkipBatches(local_optimizer=optim)
     # this is where the network is wrapped with DDDP (w/apex) or DP
-    htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim, use_apex=args.amp)
+    htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim)
 
     if args.summary:
         print(str(net))
@@ -413,6 +413,10 @@ def main():
     elif args.eval is not None:
         raise 'unknown eval option {}'.format(args.eval)
 
+    scaler = amp.GradScaler()
+
+    dp_optim.add_scaler(scaler)
+
     for epoch in range(args.start_epoch, args.max_epoch):
         # todo: HeAT fixes -- possible conflict between processes
         update_epoch(epoch)
@@ -429,7 +433,7 @@ def main():
         else:
             pass
 
-        ls = train(train_loader, htnet, dp_optim, epoch)
+        ls = train(train_loader, htnet, dp_optim, epoch, scaler)
         dp_optim.epoch_loss_logic(ls, args.epochs)
 
         if epoch % args.val_freq == 0:
