@@ -159,20 +159,20 @@ def setup_loaders(args):
     update_dataset_inst(dataset_inst=val_set)
 
     # todo: HeAT fixes -- urgent -- : HeAT sampler
-    if args.apex or args.heat:  #and not args.heat:
+    if args.apex or args.heat:  # and not args.heat:
         from datasets.sampler import DistributedSampler
         val_sampler = DistributedSampler(val_set, pad=False, permutation=False,
                                          consecutive_sample=False)
-    #elif args.heat:
-    #    from datasets.sampler import DistributedSampler
-    #    val_sampler = DistributedSampler(
-    #        val_set,
-    #        pad=False,
-    #        permutation=False,
-    #        consecutive_sample=False,
-    #        num_replicas=args.world_size,
-    #        rank=args.rank,
-    #    )
+    elif args.heat:
+        from datasets.sampler import DistributedSampler
+        val_sampler = DistributedSampler(
+            val_set,
+            pad=False,
+            permutation=False,
+            consecutive_sample=False,
+            num_replicas=args.world_size,
+            rank=args.rank,
+        )
     else:
         val_sampler = None
 

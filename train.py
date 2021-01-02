@@ -312,7 +312,7 @@ def main():
         os.environ["NCCL_SOCKET_IFNAME"] = "ib"
         torch.cuda.set_device(device)
         torch.distributed.init_process_group(backend="nccl", rank=loc_rank, world_size=args.gpus)
-        #torch.cuda.set_device(device)
+        # torch.cuda.set_device(device)
     elif args.gpus == 1:
         args.gpus = torch.cuda.device_count()
         device = "cuda:0"

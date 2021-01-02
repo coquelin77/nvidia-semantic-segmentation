@@ -112,6 +112,11 @@ def eval_metrics(iou_acc, args, net, optim, val_loss, epoch, mf_score=None):
         torch.distributed.all_reduce(iou_acc_tensor,
                                      op=torch.distributed.ReduceOp.SUM)
         iou_per_scale[1.0] = iou_acc_tensor.cpu().numpy()
+    elif args.heat:
+        # iou_acc_tens = torch.Tensor(iou_acc)
+        iou_acc_tensor = optim.comm.allreduce(iou_acc)
+        iou_per_scale[1.0] = iou_acc_tensor if isinstance(iou_acc_tensor, float) else iou_acc_tensor.item()
+
     scales = [1.0]
 
     # Only rank 0 should save models and calculate metrics
@@ -455,10 +460,19 @@ def print_evaluate_results(hist, iu, epoch=0, iou_per_scale=None,
 
         total_pixels = hist.sum()
         class_data.append(100 * iu_TP[class_id] / total_pixels)
-        class_data.append(iu_FP[class_id] / iu_TP[class_id])
-        class_data.append(iu_FN[class_id] / iu_TP[class_id])
-        class_data.append(iu_TP[class_id] / (iu_TP[class_id] + iu_FP[class_id]))
-        class_data.append(iu_TP[class_id] / (iu_TP[class_id] + iu_FN[class_id]))
+        den = iu_TP[class_id]
+        if den == 0:
+            den = 1.
+        class_data.append(iu_FP[class_id] / den)  # iu_TP[class_id])
+        class_data.append(iu_FN[class_id] / den)  # iu_TP[class_id])
+        den = (iu_TP[class_id] + iu_FP[class_id])
+        if den == 0:
+            den = 1.
+        class_data.append(iu_TP[class_id] / den)
+        den = (iu_TP[class_id] + iu_FN[class_id])
+        if den == 0:
+            den = 1.
+        class_data.append(iu_TP[class_id] / den)
         tabulate_data.append(class_data)
 
         if log_multiscale_tb:
