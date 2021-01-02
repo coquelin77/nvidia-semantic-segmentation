@@ -149,7 +149,7 @@ def eval_metrics(iou_acc, args, net, optim, val_loss, epoch, mf_score=None):
         'arch': args.arch,
         'num_classes': cfg.DATASET_INST.num_classes,
         'state_dict': net.state_dict(),
-        'optimizer': optim.state_dict(),
+        'optimizer': optim.lcl_optimizer.state_dict(),
         'mean_iu': mean_iu,
         'command': ' '.join(sys.argv[1:])
     }

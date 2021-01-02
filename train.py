@@ -265,7 +265,7 @@ parser.add_argument('--ocr_aux_loss_rmi', action='store_true', default=False,
                     help='allow rmi for aux loss')
 
 parser.add_argument("--heat", action="store_true", default=True, help="use HeAT")
-
+parser.add_argument("--amp", action="store_true", default=True, help="use torch.cuda.amp")
 
 args = parser.parse_args()
 args.best_record = {'epoch': -1, 'iter': 0, 'val_loss': 1e10, 'acc': 0,
@@ -310,8 +310,9 @@ def main():
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = "19500"
         os.environ["NCCL_SOCKET_IFNAME"] = "ib"
-        torch.distributed.init_process_group(backend="nccl", rank=loc_rank, world_size=args.gpus)
         torch.cuda.set_device(device)
+        torch.distributed.init_process_group(backend="nccl", rank=loc_rank, world_size=args.gpus)
+        #torch.cuda.set_device(device)
     elif args.gpus == 1:
         args.gpus = torch.cuda.device_count()
         device = "cuda:0"
@@ -431,7 +432,7 @@ def main():
         else:
             pass
 
-        ls = train(train_loader, htnet, dp_optim, epoch, scaler)
+        ls = train(train_loader, htnet, dp_optim, epoch, scaler, device)
         dp_optim.epoch_loss_logic(ls)
 
         if epoch % args.val_freq == 0:
@@ -440,7 +441,7 @@ def main():
         scheduler.step()
 
 
-def train(train_loader, net, optim, curr_epoch, scaler):
+def train(train_loader, net, optim, curr_epoch, scaler, device):
     """
     Runs the training loop per epoch
     train_loader: Data loader for train
@@ -463,17 +464,32 @@ def train(train_loader, net, optim, curr_epoch, scaler):
         # gts    = (bs,713,713)
         images, gts, _img_name, scale_float = data
         batch_pixel_size = images.size(0) * images.size(2) * images.size(3)
+        #print(images[0, 0 , 20, 20])
+        #print("before images to gpu")
         images, gts, scale_float = images.cuda(), gts.cuda(), scale_float.cuda()
+        #images = images.to(device)
+        #print("before gts to gpu")
+        #gts = gts.to(device)
+        #print("before scale_float to gpu")
+        #scale_float = scale_float.to(device)
+        #images, gts, scale_float = images.to(device), gts.to(device), scale_float.to(device)
+        #print(images.device)
         inputs = {'images': images, 'gts': gts}
-
+        #print("before zero grad")
         optim.zero_grad()
         if args.amp:
             with amp.autocast():
+                #print("before network")
                 main_loss = net(inputs)
-                main_loss = main_loss.mean()
+                #main_loss = main_loss.mean()
                 log_main_loss = main_loss.clone().detach_()
-                train_main_loss.update(log_main_loss.item(), batch_pixel_size)
-            scaler.scale(main_loss).backwards()
+                torch.distributed.all_reduce(log_main_loss,
+                                             torch.distributed.ReduceOp.SUM)
+                log_main_loss = log_main_loss / args.world_size
+            train_main_loss.update(log_main_loss.item(), batch_pixel_size)
+            #print("before backwards")
+            scaler.scale(main_loss).backward()
+            #print("before step")
         else:
             main_loss = net(inputs)
             main_loss = main_loss.mean()
@@ -483,6 +499,7 @@ def train(train_loader, net, optim, curr_epoch, scaler):
 
         # the scaler update is within the optim step
         optim.step()
+        #print("after step")
 
         if i >= warmup_iter:
             curr_time = time.time()
@@ -506,7 +523,8 @@ def train(train_loader, net, optim, curr_epoch, scaler):
         if i >= 10 and args.test_mode:
             del data, inputs, gts
             return
-        del data
+        #del data
+        #print("end of train loop", i)
     return train_main_loss.avg
 
 
@@ -554,23 +572,26 @@ def validate(val_loader, net, criterion, optim, epoch,
 
         input_images, labels, img_names, _ = data
 
-        dumper.dump({'gt_images': labels,
-                     'input_images': input_images,
-                     'img_names': img_names,
-                     'assets': assets}, val_idx)
+        if optim.comm.rank == 0:
+            dumper.dump({'gt_images': labels,
+                         'input_images': input_images,
+                         'img_names': img_names,
+                         'assets': assets}, val_idx)
 
         if val_idx > 5 and args.test_mode:
             break
 
-        if val_idx % 20 == 0:
+        if val_idx % 20 == 0 and optim.comm.rank == 0:
             logx.msg(f'validating[Iter: {val_idx + 1} / {len(val_loader)}]')
 
     was_best = False
-    if calc_metrics:
+    if calc_metrics and optim.comm.rank == 0:
         was_best = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
 
+    was_best = optim.comm.bcast(was_best, root=0)
+
     # Write out a summary html page and tensorboard image table
-    if not args.dump_for_auto_labelling and not args.dump_for_submission:
+    if not args.dump_for_auto_labelling and not args.dump_for_submission and optim.comm.rank == 0:
         dumper.write_summaries(was_best)
 
 
