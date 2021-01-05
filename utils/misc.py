@@ -112,10 +112,6 @@ def eval_metrics(iou_acc, args, net, optim, val_loss, epoch, mf_score=None):
         torch.distributed.all_reduce(iou_acc_tensor,
                                      op=torch.distributed.ReduceOp.SUM)
         iou_per_scale[1.0] = iou_acc_tensor.cpu().numpy()
-    elif args.heat:
-        # iou_acc_tens = torch.Tensor(iou_acc)
-        iou_acc_tensor = optim.comm.allreduce(iou_acc)
-        iou_per_scale[1.0] = iou_acc_tensor if isinstance(iou_acc_tensor, float) else iou_acc_tensor.item()
 
     scales = [1.0]
 
@@ -217,7 +213,7 @@ class ImageDumper():
     def __init__(self, val_len, tensorboard=True, write_webpage=True,
                  webpage_fn='index.html', dump_all_images=False, dump_assets=False,
                  dump_err_prob=False, dump_num=10, dump_for_auto_labelling=False, 
-                 dump_for_submission=False):
+                 dump_for_submission=False, rank=None):
         """
         :val_len: num validation images
         :tensorboard: push summary to tensorboard
@@ -260,6 +256,7 @@ class ImageDumper():
 
         self.imgs_to_tensorboard = []
         self.imgs_to_webpage = []
+        self.rank = rank
 
         if cfg.DATASET.NAME == 'cityscapes':
             # If all images of a dataset are identical, as in cityscapes,
@@ -297,7 +294,7 @@ class ImageDumper():
         """
         if self.dump_for_auto_labelling or  self.dump_for_submission:
             pass
-        elif (val_idx % self.dump_frequency or cfg.GLOBAL_RANK != 0):
+        elif val_idx % self.dump_frequency or cfg.GLOBAL_RANK != 0:
             return
         else:
             pass

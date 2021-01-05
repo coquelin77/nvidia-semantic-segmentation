@@ -48,7 +48,7 @@ import datasets
 import network
 import torch.cuda.amp as amp
 import heat as ht
-
+from mpi4py import MPI
 
 # # Import autoresume module
 # sys.path.append(os.environ.get('SUBMIT_SCRIPTS', '.'))
@@ -299,6 +299,7 @@ def main():
     Main Function
     """
     rank = args.rank
+    cfg.GLOBAL_RANK = rank
     args.gpus = torch.cuda.device_count()
     device = torch.device("cpu")
     loc_dist = True if args.gpus > 1 else False
@@ -432,7 +433,7 @@ def main():
         else:
             pass
 
-        ls = train(train_loader, htnet, dp_optim, epoch, scaler, device)
+        ls = train(train_loader, htnet, dp_optim, epoch, scaler)
         dp_optim.epoch_loss_logic(ls)
 
         if epoch % args.val_freq == 0:
@@ -441,7 +442,7 @@ def main():
         scheduler.step()
 
 
-def train(train_loader, net, optim, curr_epoch, scaler, device):
+def train(train_loader, net, optim, curr_epoch, scaler):
     """
     Runs the training loop per epoch
     train_loader: Data loader for train
@@ -457,39 +458,25 @@ def train(train_loader, net, optim, curr_epoch, scaler, device):
     warmup_iter = 10
     optim.last_batch = len(train_loader) - 1
     for i, data in enumerate(train_loader):
-        #print(i, "start training loop")
         if i <= warmup_iter:
             start_time = time.time()
         # inputs = (bs,3,713,713)
         # gts    = (bs,713,713)
         images, gts, _img_name, scale_float = data
         batch_pixel_size = images.size(0) * images.size(2) * images.size(3)
-        #print(images[0, 0 , 20, 20])
-        #print("before images to gpu")
         images, gts, scale_float = images.cuda(), gts.cuda(), scale_float.cuda()
-        #images = images.to(device)
-        #print("before gts to gpu")
-        #gts = gts.to(device)
-        #print("before scale_float to gpu")
-        #scale_float = scale_float.to(device)
-        #images, gts, scale_float = images.to(device), gts.to(device), scale_float.to(device)
-        #print(images.device)
         inputs = {'images': images, 'gts': gts}
-        #print("before zero grad")
         optim.zero_grad()
         if args.amp:
             with amp.autocast():
-                #print("before network")
                 main_loss = net(inputs)
-                #main_loss = main_loss.mean()
                 log_main_loss = main_loss.clone().detach_()
-                torch.distributed.all_reduce(log_main_loss,
-                                             torch.distributed.ReduceOp.SUM)
-                log_main_loss = log_main_loss / args.world_size
+                # torch.distributed.all_reduce(log_main_loss,
+                #                              torch.distributed.ReduceOp.SUM)
+                # # optim.comm.Allreduce
+                # log_main_loss = log_main_loss / args.world_size
             train_main_loss.update(log_main_loss.item(), batch_pixel_size)
-            #print("before backwards")
             scaler.scale(main_loss).backward()
-            #print("before step")
         else:
             main_loss = net(inputs)
             main_loss = main_loss.mean()
@@ -499,7 +486,6 @@ def train(train_loader, net, optim, curr_epoch, scaler, device):
 
         # the scaler update is within the optim step
         optim.step()
-        #print("after step")
 
         if i >= warmup_iter:
             curr_time = time.time()
@@ -523,8 +509,6 @@ def train(train_loader, net, optim, curr_epoch, scaler, device):
         if i >= 10 and args.test_mode:
             del data, inputs, gts
             return
-        #del data
-        #print("end of train loop", i)
     return train_main_loss.avg
 
 
@@ -544,11 +528,14 @@ def validate(val_loader, net, criterion, optim, epoch,
     :dump_assets: dump attention prediction(s) images
     :dump_all_images: dump all images, not just N
     """
-    dumper = ImageDumper(val_len=len(val_loader),
-                         dump_all_images=dump_all_images,
-                         dump_assets=dump_assets,
-                         dump_for_auto_labelling=args.dump_for_auto_labelling,
-                         dump_for_submission=args.dump_for_submission)
+    dumper = ImageDumper(
+        val_len=len(val_loader),
+        dump_all_images=dump_all_images,
+        dump_assets=dump_assets,
+        dump_for_auto_labelling=args.dump_for_auto_labelling,
+        dump_for_submission=args.dump_for_submission,
+        rank=rank
+    )
 
     net.eval()
     val_loss = AverageMeter()
@@ -581,11 +568,17 @@ def validate(val_loader, net, criterion, optim, epoch,
         if val_idx > 5 and args.test_mode:
             break
 
-        if val_idx % 20 == 0 and optim.comm.rank == 0:
+        if val_idx % 2 == 0 and optim.comm.rank == 0:
             logx.msg(f'validating[Iter: {val_idx + 1} / {len(val_loader)}]')
 
+    # average the loss value
+    optim.comm.Allreduce(MPI.IN_PLACE, val_loss, MPI.SUM)
+    val_loss /= float(optim.comm.size)
+    # sum up the iou_acc
+    optim.comm.Allreduce(MPI.IN_PLACE, iou_acc, MPI.SUM)
+
     was_best = False
-    if calc_metrics and optim.comm.rank == 0:
+    if calc_metrics:
         was_best = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
 
     was_best = optim.comm.bcast(was_best, root=0)
