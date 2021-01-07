@@ -473,15 +473,16 @@ def train(train_loader, net, optim, curr_epoch, scaler):
                 log_main_loss = main_loss.clone().detach_()
                 # torch.distributed.all_reduce(log_main_loss,
                 #                              torch.distributed.ReduceOp.SUM)
-                # # optim.comm.Allreduce
+                log_wait = optim.comm.Iallreduce(MPI.IN_PLACE, log_main_loss, MPI.SUM)
                 # log_main_loss = log_main_loss / args.world_size
-            train_main_loss.update(log_main_loss.item(), batch_pixel_size)
+            # train_main_loss.update(log_main_loss.item(), batch_pixel_size)
             scaler.scale(main_loss).backward()
         else:
             main_loss = net(inputs)
             main_loss = main_loss.mean()
             log_main_loss = main_loss.clone().detach_()
-            train_main_loss.update(log_main_loss.item(), batch_pixel_size)
+            log_wait = None
+            #train_main_loss.update(log_main_loss.item(), batch_pixel_size)
             main_loss.backward()
 
         # the scaler update is within the optim step
@@ -493,6 +494,11 @@ def train(train_loader, net, optim, curr_epoch, scaler):
             batchtime = (curr_time - start_time) / batches
         else:
             batchtime = 0
+
+        if log_wait is not None:
+            log_wait.Wait()
+        log_main_loss = log_main_loss / args.world_size
+        train_main_loss.update(log_main_loss.item(), batch_pixel_size)
 
         msg = ('[epoch {}], [iter {} / {}], [train main loss {:0.6f}],'
                ' [lr {:0.6f}] [batchtime {:0.3g}]')
@@ -572,8 +578,10 @@ def validate(val_loader, net, criterion, optim, epoch,
             logx.msg(f'validating[Iter: {val_idx + 1} / {len(val_loader)}]')
 
     # average the loss value
-    optim.comm.Allreduce(MPI.IN_PLACE, val_loss, MPI.SUM)
-    val_loss /= float(optim.comm.size)
+    val_loss_tens = torch.tensor(val_loss.val)
+    optim.comm.Allreduce(MPI.IN_PLACE, val_loss_tens, MPI.SUM)
+    val_loss_tens /= float(optim.comm.size)
+    val_loss.val = val_loss_tens.item()
     # sum up the iou_acc
     optim.comm.Allreduce(MPI.IN_PLACE, iou_acc, MPI.SUM)
 
