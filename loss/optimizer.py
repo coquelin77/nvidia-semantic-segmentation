@@ -92,6 +92,8 @@ def get_optimizer(args, net):
     elif args.lr_schedule == 'poly':
         scheduler = optim.lr_scheduler.LambdaLR(optimizer,
                                                 lr_lambda=poly_schd)
+    elif args.lr_schedule == "plateau":
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.005, min_lr=1e-6)
     else:
         raise ValueError('unknown lr schedule {}'.format(args.lr_schedule))
 
