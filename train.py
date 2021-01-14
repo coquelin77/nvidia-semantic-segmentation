@@ -363,7 +363,7 @@ def main():
 
     # no scheduler for this optimizer!
     # the scheduler in this code is only run at the end of each epoch
-    dp_optim = ht.optim.SkipBatches(local_optimizer=optim, total_epochs=args.max_epoch)
+    dp_optim = ht.optim.SkipBatches(local_optimizer=optim, total_epochs=args.max_epoch, max_global_skips=4)
     # this is where the network is wrapped with DDDP (w/apex) or DP
     htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim)
 
@@ -387,6 +387,7 @@ def main():
     torch.cuda.empty_cache()
 
     if args.start_epoch != 0:
+        # TODO: need a loss value for the restart at a certain epoch...
         scheduler.step(args.start_epoch)
 
     # There are 4 options for evaluation:
@@ -436,10 +437,12 @@ def main():
         ls = train(train_loader, htnet, dp_optim, epoch, scaler)
         dp_optim.epoch_loss_logic(ls)
 
-        if epoch % args.val_freq == 0:
-            validate(val_loader, htnet, criterion_val, dp_optim, epoch)
-
-        scheduler.step()
+        #if epoch % args.val_freq == 0:
+        val_loss = validate(val_loader, htnet, criterion_val, dp_optim, epoch)
+        if args.lr_schedule == "plateau":
+            scheduler.step(ls)  # val_loss)
+        else:
+            scheduler.step()
 
 
 def train(train_loader, net, optim, curr_epoch, scaler):
@@ -585,15 +588,17 @@ def validate(val_loader, net, criterion, optim, epoch,
     # sum up the iou_acc
     optim.comm.Allreduce(MPI.IN_PLACE, iou_acc, MPI.SUM)
 
-    was_best = False
+    # was_best = False
     if calc_metrics:
-        was_best = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
+        #was_best = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
+        eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
 
-    was_best = optim.comm.bcast(was_best, root=0)
-
-    # Write out a summary html page and tensorboard image table
-    if not args.dump_for_auto_labelling and not args.dump_for_submission and optim.comm.rank == 0:
-        dumper.write_summaries(was_best)
+    # was_best = optim.comm.bcast(was_best, root=0)
+    #
+    # # Write out a summary html page and tensorboard image table
+    # if not args.dump_for_auto_labelling and not args.dump_for_submission and optim.comm.rank == 0:
+    #     dumper.write_summaries(was_best)
+    return val_loss.val
 
 
 if __name__ == '__main__':

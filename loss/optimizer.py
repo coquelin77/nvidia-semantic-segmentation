@@ -93,7 +93,13 @@ def get_optimizer(args, net):
         scheduler = optim.lr_scheduler.LambdaLR(optimizer,
                                                 lr_lambda=poly_schd)
     elif args.lr_schedule == "plateau":
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.005, min_lr=1e-6)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, 
+            factor=0.5, # past one 0.75 / 5 (80%) 
+            patience=4,  # 0.5 / 5 -> 79.5ish %
+            #cooldown=1, 
+            min_lr=1e-6
+        )
     else:
         raise ValueError('unknown lr schedule {}'.format(args.lr_schedule))
 
