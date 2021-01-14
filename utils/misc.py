@@ -117,7 +117,7 @@ def eval_metrics(iou_acc, args, net, optim, val_loss, epoch, mf_score=None):
 
     # Only rank 0 should save models and calculate metrics
     if args.global_rank != 0:
-        return
+        return None, 0
 
     hist = iou_per_scale[args.default_scale]
     iu, acc, acc_cls = calculate_iou(hist)
@@ -199,7 +199,7 @@ def eval_metrics(iou_acc, args, net, optim, val_loss, epoch, mf_score=None):
         logx.msg(best_scores)
     logx.msg('-' * 107)
 
-    return was_best
+    return was_best, mean_iu
 
 
 class ImageDumper():

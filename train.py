@@ -266,6 +266,12 @@ parser.add_argument('--ocr_aux_loss_rmi', action='store_true', default=False,
 
 parser.add_argument("--heat", action="store_true", default=True, help="use HeAT")
 parser.add_argument("--amp", action="store_true", default=True, help="use torch.cuda.amp")
+parser.add_argument(
+    "--benchmarking",
+    action="store_true",
+    default=False,
+    help="if true, this will save the loss values and accuracy values to a csv file"
+)
 
 args = parser.parse_args()
 args.best_record = {'epoch': -1, 'iter': 0, 'val_loss': 1e10, 'acc': 0,
@@ -417,6 +423,18 @@ def main():
     scaler = amp.GradScaler()
 
     dp_optim.add_scaler(scaler)
+    if args.benchmarking:
+        out_dict = {
+            "train_losses": [],
+            "train_btimes": [],
+            "train_ttime": [],
+            "val_losses": [],
+            "val_iu": [],
+            "val_ttime": [],
+            "epochs": list(range(args.start_epoch, args.max_epoch))
+        }
+    # train_losses, train_btimes, train_ttime = [], [], []
+    # val_losses, val_iu, val_ttime = [], [], []
 
     for epoch in range(args.start_epoch, args.max_epoch):
         # todo: HeAT fixes -- possible conflict between processes
@@ -434,15 +452,31 @@ def main():
         else:
             pass
 
-        ls = train(train_loader, htnet, dp_optim, epoch, scaler)
-        dp_optim.epoch_loss_logic(ls)
+        ls, bt, btt = train(train_loader, htnet, dp_optim, epoch, scaler)
+        dp_optim.epoch_loss_logic(ls, loss_globally_averaged=True)
 
-        #if epoch % args.val_freq == 0:
-        val_loss = validate(val_loader, htnet, criterion_val, dp_optim, epoch)
+        # if epoch % args.val_freq == 0:
+        vls, iu, vtt = validate(val_loader, htnet, criterion_val, dp_optim, epoch)
         if args.lr_schedule == "plateau":
             scheduler.step(ls)  # val_loss)
         else:
             scheduler.step()
+
+        if args.benchmarking:
+            out_dict['train_losses'].append(ls)
+            out_dict['train_btimes'].append(bt)
+            out_dict['train_ttime'].append(btt)
+            out_dict['val_losses'].append(vls)
+            out_dict['val_iu'].append(iu)
+            out_dict['val_ttime'].append(vtt)
+
+    if args.benchmarking:
+        import pandas as pd
+        nodes = str(dp_optim.comm.size / torch.cuda.device_count())
+        out_df = pd.DataFrame(out_dict)
+        out_df = out_df.set_index("epochs")
+        # todo: deal with the case that this is continuation from a previous run (append DF)
+        out_df.to_csv(nodes + "nvcitys-benchmark.csv")
 
 
 def train(train_loader, net, optim, curr_epoch, scaler):
@@ -454,12 +488,15 @@ def train(train_loader, net, optim, curr_epoch, scaler):
     curr_epoch: current epoch
     return:
     """
+    full_bt = time.perf_counter()
     net.train()
 
     train_main_loss = AverageMeter()
     start_time = None
     warmup_iter = 10
     optim.last_batch = len(train_loader) - 1
+    btimes = []
+    batch_time = time.perf_counter()
     for i, data in enumerate(train_loader):
         if i <= warmup_iter:
             start_time = time.time()
@@ -518,7 +555,16 @@ def train(train_loader, net, optim, curr_epoch, scaler):
         if i >= 10 and args.test_mode:
             del data, inputs, gts
             return
-    return train_main_loss.avg
+        btimes.append(time.perf_counter() - batch_time)
+        batch_time = time.perf_counter()
+
+    if args.benchmarking:
+        train_loss_tens = torch.tensor(train_main_loss.avg)
+        optim.comm.Allreduce(MPI.IN_PLACE, train_loss_tens, MPI.SUM)
+        train_loss_tens /= float(optim.comm.size)
+        train_main_loss.avg = train_loss_tens.item()
+
+    return train_main_loss.avg, torch.mean(torch.tensor(btimes)), time.perf_counter() - full_bt
 
 
 def validate(val_loader, net, criterion, optim, epoch,
@@ -537,6 +583,7 @@ def validate(val_loader, net, criterion, optim, epoch,
     :dump_assets: dump attention prediction(s) images
     :dump_all_images: dump all images, not just N
     """
+    val_time = time.perf_counter()
     dumper = ImageDumper(
         val_len=len(val_loader),
         dump_all_images=dump_all_images,
@@ -549,7 +596,6 @@ def validate(val_loader, net, criterion, optim, epoch,
     net.eval()
     val_loss = AverageMeter()
     iou_acc = 0
-
     for val_idx, data in enumerate(val_loader):
         input_images, labels, img_names, _ = data 
         if args.dump_for_auto_labelling or args.dump_for_submission:
@@ -590,15 +636,16 @@ def validate(val_loader, net, criterion, optim, epoch,
 
     # was_best = False
     if calc_metrics:
-        #was_best = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
-        eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
+        # was_best = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
+        _, mean_iu = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
 
+    optim.comm.bcast(mean_iu, root=0)
     # was_best = optim.comm.bcast(was_best, root=0)
     #
     # # Write out a summary html page and tensorboard image table
     # if not args.dump_for_auto_labelling and not args.dump_for_submission and optim.comm.rank == 0:
     #     dumper.write_summaries(was_best)
-    return val_loss.val
+    return val_loss.val, mean_iu, time.perf_counter() - val_time
 
 
 if __name__ == '__main__':

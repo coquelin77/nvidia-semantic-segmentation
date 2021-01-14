@@ -613,7 +613,7 @@ def validate(val_loader, net, criterion, optim, epoch,
 
     was_best = False
     if calc_metrics:
-        was_best = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
+        was_best, _ = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
 
     # Write out a summary html page and tensorboard image table
     if not args.dump_for_auto_labelling and not args.dump_for_submission:
