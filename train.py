@@ -348,8 +348,9 @@ def main():
     train_loader, val_loader, train_obj = datasets.setup_loaders(args)
     criterion, criterion_val = get_loss(args)
 
+    cwd = os.getcwd()
     sz = ht.MPI_WORLD.size
-    filename = "citys-heat-checkpoint-" + str(sz) + ".pth.tar"
+    filename = cwd + "/citys-heat-checkpoint-" + str(sz) + ".pth.tar"
     if args.resume and os.path.isfile(filename):
         checkpoint = torch.load(filename,
                                 map_location=torch.device('cpu'))
