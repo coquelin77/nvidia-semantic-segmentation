@@ -61,7 +61,7 @@ from mpi4py import MPI
 
 # Argument Parser
 parser = argparse.ArgumentParser(description='Semantic Segmentation')
-parser.add_argument('--lr', type=float, default=0.002)
+parser.add_argument('--lr', type=float, default=0.0125)  # 0.002)
 # default network is deepv3.DeepV3PlusW38 or deepv3.DeepV3PlusW38I
 parser.add_argument('--arch', type=str, default='deepv3.DeepWV3Plus',
                     help='Network architecture. We have DeepSRNX50V3PlusD (backbone: ResNeXt50) \
@@ -288,6 +288,8 @@ if args.deterministic:
 if args.test_mode:
     args.max_epoch = 2
 
+# torch.manual_seed(999999999)
+
 args.heat = True
 args.world_size = ht.MPI_WORLD.size
 args.rank = rank = ht.MPI_WORLD.rank
@@ -360,7 +362,7 @@ def main():
     # todo: HeAT fixes -- urgent -- DDDP / optim / scheduler
     net = network.get_net(args, criterion)
     net = net.to(device)
-
+    # args.lr = (1. / args.world_size * (5 * (args.world_size - 1) / 6.)) * 0.0125 * args.world_size
     # todo: optim -> direct wrap after this, scheduler stays the same?
     optim, scheduler = get_optimizer(args, net)
 
@@ -369,7 +371,12 @@ def main():
 
     # no scheduler for this optimizer!
     # the scheduler in this code is only run at the end of each epoch
-    dp_optim = ht.optim.SkipBatches(local_optimizer=optim, total_epochs=args.max_epoch, max_global_skips=4)
+    dp_optim = ht.optim.SkipBatches(
+        local_optimizer=optim, 
+        total_epochs=args.max_epoch, 
+        max_global_skips=4,
+        stablitiy_level=0.05
+    )
     # this is where the network is wrapped with DDDP (w/apex) or DP
     htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim)
 
@@ -421,7 +428,8 @@ def main():
         raise 'unknown eval option {}'.format(args.eval)
 
     scaler = amp.GradScaler()
-
+    if dp_optim.comm.rank == 0:
+        print("scheduler", args.lr_schedule)
     dp_optim.add_scaler(scaler)
     if args.benchmarking:
         out_dict = {
@@ -458,6 +466,8 @@ def main():
         # if epoch % args.val_freq == 0:
         vls, iu, vtt = validate(val_loader, htnet, criterion_val, dp_optim, epoch)
         if args.lr_schedule == "plateau":
+            if dp_optim.comm.rank == 0:
+                print("loss", ls, 'best:', scheduler.best * (1. - scheduler.threshold), scheduler.num_bad_epochs)
             scheduler.step(ls)  # val_loss)
         else:
             scheduler.step()
@@ -479,6 +489,24 @@ def main():
         out_df.to_csv(nodes + "nvcitys-benchmark.csv")
 
 
+def lr_warmup(optimizer, epoch, bn, len_epoch, max_lr=0.4):
+    if epoch < 5 and bn is not None:
+        #sz = ht.MPI_WORLD.size
+        #f0 = max_lr / base_lr
+        #f1 = (epoch + 1.) / 5.
+        #f2 = float(bn + 1) / float(len_epoch)
+        #epoch += float(bn + 1) / len_epoch
+        #lr_adjust = ((float(bn + 1) / len_epoch)* (epoch + 1.)) / 5.
+        lr_adjust = (bn + (epoch * len_epoch)) / float(len_epoch * 5.)
+        #lr_adj = 1.0 / sz * (epoch * (sz - 1) / 6.0)
+    else:
+        return
+
+    args.lr = max_lr * lr_adjust
+    for param_group in optimizer.lcl_optimizer.param_groups:
+        param_group["lr"] = args.lr  # ht.MPI_WORLD.size * lr_adj
+
+
 def train(train_loader, net, optim, curr_epoch, scaler):
     """
     Runs the training loop per epoch
@@ -498,6 +526,8 @@ def train(train_loader, net, optim, curr_epoch, scaler):
     btimes = []
     batch_time = time.perf_counter()
     for i, data in enumerate(train_loader):
+        lr_warmup(optim, curr_epoch, i, len(train_loader), max_lr=0.4)
+
         if i <= warmup_iter:
             start_time = time.time()
         # inputs = (bs,3,713,713)
@@ -649,4 +679,5 @@ def validate(val_loader, net, criterion, optim, epoch,
 
 
 if __name__ == '__main__':
+    torch.manual_seed(999999999)
     main()

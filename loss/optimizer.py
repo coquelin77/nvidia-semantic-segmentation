@@ -95,10 +95,19 @@ def get_optimizer(args, net):
     elif args.lr_schedule == "plateau":
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, 
-            factor=0.5, # past one 0.75 / 5 (80%) 
-            patience=4,  # 0.5 / 5 -> 79.5ish %
+            factor=0.75, # 0.75 / 5 -> 80% ; 0.74 / 4 -> 77% 
+            patience=5,  # 0.25 / 8 / base -> 80%
+            threshold=-0.015, # 0.75 / 7 / base -> 80.44%
             #cooldown=1, 
-            min_lr=1e-6
+# 			0.75 / 6 / base -> 79.44
+# 			0.75 / 7 / .001 -> 79.793
+# 			0.75 / 7 / 0.05 -> ?? -> not decreasing
+#			0.5 / 5 / base -> 75.
+#			** added lr warmup **
+# 			0.75 / 5 / base -> 81.85
+#			** added different is_best logic for negative losses in skips**
+#			0.75 / 5 / -0.015 -> 
+            min_lr=1e-4
         )
     else:
         raise ValueError('unknown lr schedule {}'.format(args.lr_schedule))
