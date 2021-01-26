@@ -47,8 +47,10 @@ from loss.optimizer import get_optimizer, restore_opt, restore_net
 import datasets
 import network
 import torch.cuda.amp as amp
-import pickle
+import horovod.torch as hvd
 import heat as ht
+import pickle
+
 from mpi4py import MPI
 
 # # Import autoresume module
@@ -62,7 +64,7 @@ from mpi4py import MPI
 
 # Argument Parser
 parser = argparse.ArgumentParser(description='Semantic Segmentation')
-parser.add_argument('--lr', type=float, default=0.0125)  # 0.002)
+parser.add_argument('--lr', type=float, default=0.002)
 # default network is deepv3.DeepV3PlusW38 or deepv3.DeepV3PlusW38I
 parser.add_argument('--arch', type=str, default='deepv3.DeepWV3Plus',
                     help='Network architecture. We have DeepSRNX50V3PlusD (backbone: ResNeXt50) \
@@ -279,11 +281,6 @@ args.best_record = {'epoch': -1, 'iter': 0, 'val_loss': 1e10, 'acc': 0,
                     'acc_cls': 0, 'mean_iu': 0, 'fwavacc': 0}
 
 
-def save_checkpoint(state):
-    sz = ht.MPI_WORLD.size
-    filename = "citys-heat-checkpoint-" + str(sz) + ".pth.tar"
-    torch.save(state, filename)
-
 # Enable CUDNN Benchmarking optimization
 torch.backends.cudnn.benchmark = True
 if args.deterministic:
@@ -294,13 +291,18 @@ if args.deterministic:
 if args.test_mode:
     args.max_epoch = 2
 
-# torch.manual_seed(999999999)
-
-args.heat = True
+args.heat = False
+args.apex = False
+args.hvd = True
 args.world_size = ht.MPI_WORLD.size
 args.rank = rank = ht.MPI_WORLD.rank
 args.global_rank = args.rank
-args.apex = False
+
+
+def save_checkpoint(state):
+    sz = ht.MPI_WORLD.size
+    filename = "citys-hvd-checkpoint-" + str(sz) + ".pth.tar"
+    torch.save(state, filename)
 
 
 def print0(*args, **kwargs):
@@ -316,23 +318,8 @@ def main():
     cfg.GLOBAL_RANK = rank
     args.gpus = torch.cuda.device_count()
     device = torch.device("cpu")
-    loc_dist = True if args.gpus > 1 else False
-    loc_rank = rank % args.gpus
-    args.gpu = loc_rank
-    args.local_rank = loc_rank
-    if loc_dist:
-        device = "cuda:" + str(loc_rank)
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "19500"
-        os.environ["NCCL_SOCKET_IFNAME"] = "ib"
-        torch.cuda.set_device(device)
-        torch.distributed.init_process_group(backend="nccl", rank=loc_rank, world_size=args.gpus)
-        # torch.cuda.set_device(device)
-    elif args.gpus == 1:
-        args.gpus = torch.cuda.device_count()
-        device = "cuda:0"
-        args.local_rank = 0
-        torch.cuda.set_device(device)
+    hvd.init()
+    torch.manual_seed(999999)
 
     assert args.result_dir is not None, 'need to define result_dir arg'
     logx.initialize(logdir=args.result_dir,
@@ -349,7 +336,7 @@ def main():
     criterion, criterion_val = get_loss(args)
 
     sz = ht.MPI_WORLD.size
-    filename = "citys-heat-checkpoint-" + str(sz) + ".pth.tar"
+    filename = "citys-hvd-checkpoint-" + str(sz) + ".pth.tar"
     if args.resume and os.path.isfile(filename):
         checkpoint = torch.load(filename,
                                 map_location=torch.device('cpu'))
@@ -370,19 +357,21 @@ def main():
     # todo: HeAT fixes -- urgent -- DDDP / optim / scheduler
     net = network.get_net(args, criterion)
     net = net.to(device)
-    # args.lr = (1. / args.world_size * (5 * (args.world_size - 1) / 6.)) * 0.0125 * args.world_size
+
     # todo: optim -> direct wrap after this, scheduler stays the same?
     optim, scheduler = get_optimizer(args, net)
 
-    # the scheduler in this code is only run at the end of each epoch
-    dp_optim = ht.optim.SkipBatches(
-        local_optimizer=optim, 
-        total_epochs=args.max_epoch, 
-        max_global_skips=4,
-        stablitiy_level=0.05
+    # if args.fp16:
+    #     net, optim = amp.initialize(net, optim, opt_level=args.amp_opt_level)
+    compression = hvd.Compression.fp16  # if args.fp16_allreduce else hvd.Compression.none
+
+    optim = hvd.DistributedOptimizer(
+        optim, named_parameters=net.named_parameters(),
+        compression=compression,
+        backward_passes_per_step=1,  # args.batches_per_allreduce,
+        op=hvd.Average,
+        gradient_predivide_factor=1.0,  # args.gradient_predivide_factor)
     )
-    # this is where the network is wrapped with DDDP (w/apex) or DP
-    htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim)
 
     if args.summary:
         print(str(net))
@@ -395,7 +384,6 @@ def main():
 
     if args.restore_optimizer:
         restore_opt(optim, checkpoint)
-        dp_optim.stability.load_dict(checkpoint["skip_stable"])
     if args.restore_net:
         restore_net(net, checkpoint)
 
@@ -403,6 +391,9 @@ def main():
         net.module.init_mods()
 
     torch.cuda.empty_cache()
+
+    hvd.broadcast_parameters(net.state_dict(), root_rank=0)
+    hvd.broadcast_optimizer_state(optim, root_rank=0)
 
     if args.start_epoch != 0:
         # TODO: need a loss value for the restart at a certain epoch...
@@ -414,32 +405,29 @@ def main():
     #  --eval folder                        just dump all basic images
     #  --eval folder --dump_assets          dump all images and assets
     # todo: HeAT fixes -- not urgent --
-    if args.eval == 'val':
-        if args.dump_topn:
-            validate_topn(val_loader, net, criterion_val, optim, 0, args)
-        else:
-            validate(val_loader, net, criterion=criterion_val, optim=optim, epoch=0,
-                     dump_assets=args.dump_assets,
-                     dump_all_images=args.dump_all_images,
-                     calc_metrics=not args.no_metrics)
-        return 0
-    elif args.eval == 'folder':
-        # Using a folder for evaluation means to not calculate metrics
-        validate(val_loader, net, criterion=None, optim=None, epoch=0,
-                 calc_metrics=False, dump_assets=args.dump_assets,
-                 dump_all_images=True)
-        return 0
-    elif args.eval is not None:
-        raise 'unknown eval option {}'.format(args.eval)
+    # if args.eval == 'val':
+    #     if args.dump_topn:
+    #         validate_topn(val_loader, net, criterion_val, optim, 0, args)
+    #     else:
+    #         validate(val_loader, net, criterion=criterion_val, optim=optim, epoch=0,
+    #                  dump_assets=args.dump_assets,
+    #                  dump_all_images=args.dump_all_images,
+    #                  calc_metrics=not args.no_metrics)
+    #     return 0
+    # elif args.eval == 'folder':
+    #     # Using a folder for evaluation means to not calculate metrics
+    #     validate(val_loader, net, criterion=None, optim=None, epoch=0,
+    #              calc_metrics=False, dump_assets=args.dump_assets,
+    #              dump_all_images=True)
+    #     return 0
+    # elif args.eval is not None:
+    #     raise 'unknown eval option {}'.format(args.eval)
 
     scaler = amp.GradScaler()
-    if dp_optim.comm.rank == 0:
-        print("scheduler", args.lr_schedule)
-    dp_optim.add_scaler(scaler)
 
-    nodes = str(int(dp_optim.comm.size / torch.cuda.device_count()))
+    nodes = str(int(hvd.get__size() / torch.cuda.device_count()))
     cwd = os.getcwd()
-    fname = cwd + "/" + nodes + "-heat-citys-benchmark"
+    fname = cwd + "/" + nodes + "-hvd-citys-benchmark"
     if args.resume and rank == 0 and os.path.isfile(fname + ".pkl"):
         with open(fname + ".pkl", "rb") as f:
             out_dict = pickle.load(f)
@@ -454,7 +442,8 @@ def main():
             nodes + "-val-time": [],
         }
         print0("Output dict:", fname)
-
+    # train_losses, train_btimes, train_ttime = [], [], []
+    # val_losses, val_iu, val_ttime = [], [], []
 
     for epoch in range(args.start_epoch, args.max_epoch):
         # todo: HeAT fixes -- possible conflict between processes
@@ -472,14 +461,12 @@ def main():
         else:
             pass
 
-        ls, bt, btt = train(train_loader, htnet, dp_optim, epoch, scaler)
-        dp_optim.epoch_loss_logic(ls, loss_globally_averaged=True)
+        ls, bt, btt = train(train_loader, net, optim, epoch, scaler)
+        # dp_optim.epoch_loss_logic(ls, loss_globally_averaged=True)
 
         # if epoch % args.val_freq == 0:
-        vls, iu, vtt = validate(val_loader, htnet, criterion_val, dp_optim, epoch)
+        vls, iu, vtt = validate(val_loader, net, criterion_val, optim, epoch)
         if args.lr_schedule == "plateau":
-            if dp_optim.comm.rank == 0:
-                print("loss", ls, 'best:', scheduler.best * (1. - scheduler.threshold), scheduler.num_bad_epochs)
             scheduler.step(ls)  # val_loss)
         else:
             scheduler.step()
@@ -488,7 +475,7 @@ def main():
             save_checkpoint(
                 {
                     "epoch": epoch + 1,
-                    "state_dict": htnet.state_dict(),
+                    "state_dict": net.state_dict(),
                     "optimizer": optim.state_dict(),
                     "skip_stable": optim.stability.get_dict()
                 }
@@ -511,11 +498,11 @@ def main():
             print(df)
         if args.benchmarking:
             try:
-                fulldf = pd.read_csv(cwd + "/heat-bench-results.csv")
+                fulldf = pd.read_csv(cwd + "/hvd-bench-results.csv")
                 fulldf = pd.concat([df, fulldf], axis=1)
             except FileNotFoundError:
                 fulldf = df
-            fulldf.to_csv(cwd + "/heat-bench-results.csv")
+            fulldf.to_csv(cwd + "/hvd-bench-results.csv")
 
 
 def lr_warmup(optimizer, epoch, bn, len_epoch, max_lr=0.4):
@@ -525,7 +512,7 @@ def lr_warmup(optimizer, epoch, bn, len_epoch, max_lr=0.4):
         return
 
     args.lr = max_lr * lr_adjust
-    for param_group in optimizer.lcl_optimizer.param_groups:
+    for param_group in optimizer.param_groups:
         param_group["lr"] = args.lr
 
 
@@ -563,22 +550,23 @@ def train(train_loader, net, optim, curr_epoch, scaler):
             with amp.autocast():
                 main_loss = net(inputs)
                 log_main_loss = main_loss.clone().detach_()
-                # torch.distributed.all_reduce(log_main_loss,
-                #                              torch.distributed.ReduceOp.SUM)
-                log_wait = optim.comm.Iallreduce(MPI.IN_PLACE, log_main_loss, MPI.SUM)
+                log_main_loss = hvd.allreduce(log_main_loss)
+                # log_wait = optim.comm.Iallreduce(MPI.IN_PLACE, log_main_loss, MPI.SUM)
                 # log_main_loss = log_main_loss / args.world_size
-            # train_main_loss.update(log_main_loss.item(), batch_pixel_size)
+            train_main_loss.update(log_main_loss.item(), batch_pixel_size)
             scaler.scale(main_loss).backward()
         else:
             main_loss = net(inputs)
             main_loss = main_loss.mean()
-            log_main_loss = main_loss.clone().detach_()
-            log_wait = None
-            #train_main_loss.update(log_main_loss.item(), batch_pixel_size)
+            train_main_loss.update(log_main_loss.item(), batch_pixel_size)
             main_loss.backward()
 
         # the scaler update is within the optim step
-        optim.step()
+        if args.amp:
+            scaler.step(optim)
+            scaler.update()
+        else:
+            optim.step()
 
         if i >= warmup_iter:
             curr_time = time.time()
@@ -587,20 +575,20 @@ def train(train_loader, net, optim, curr_epoch, scaler):
         else:
             batchtime = 0
 
-        if log_wait is not None:
-            log_wait.Wait()
-        log_main_loss = log_main_loss / args.world_size
-        train_main_loss.update(log_main_loss.item(), batch_pixel_size)
+        # if log_wait is not None:
+        #     log_wait.Wait()
+        # log_main_loss = log_main_loss / args.world_size
+        # train_main_loss.update(log_main_loss.item(), batch_pixel_size)
 
         msg = ('[epoch {}], [iter {} / {}], [train main loss {:0.6f}],'
                ' [lr {:0.6f}] [batchtime {:0.3g}]')
         msg = msg.format(
             curr_epoch, i + 1, len(train_loader), train_main_loss.avg,
-            optim.lcl_optimizer.param_groups[-1]['lr'], batchtime)
+            optim.param_groups[-1]['lr'], batchtime)
         logx.msg(msg)
 
         metrics = {'loss': train_main_loss.avg,
-                   'lr': optim.lcl_optimizer.param_groups[-1]['lr']}
+                   'lr': optim.param_groups[-1]['lr']}
         curr_iter = curr_epoch * len(train_loader) + i
         logx.metric('train', metrics, curr_iter)
 
@@ -612,8 +600,8 @@ def train(train_loader, net, optim, curr_epoch, scaler):
 
     if args.benchmarking:
         train_loss_tens = torch.tensor(train_main_loss.avg)
-        optim.comm.Allreduce(MPI.IN_PLACE, train_loss_tens, MPI.SUM)
-        train_loss_tens /= float(optim.comm.size)
+        train_loss_tens = hvd.allreduce(train_loss_tens)
+        # train_loss_tens /= float(optim.comm.size)
         train_main_loss.avg = train_loss_tens.item()
 
     return train_main_loss.avg, torch.mean(torch.tensor(btimes)), time.perf_counter() - full_bt
@@ -649,7 +637,7 @@ def validate(val_loader, net, criterion, optim, epoch,
     val_loss = AverageMeter()
     iou_acc = 0
     for val_idx, data in enumerate(val_loader):
-        input_images, labels, img_names, _ = data 
+        input_images, labels, img_names, _ = data
         if args.dump_for_auto_labelling or args.dump_for_submission:
             submit_fn = '{}.png'.format(img_names[0])
             if val_idx % 20 == 0:
@@ -680,18 +668,19 @@ def validate(val_loader, net, criterion, optim, epoch,
 
     # average the loss value
     val_loss_tens = torch.tensor(val_loss.val)
-    optim.comm.Allreduce(MPI.IN_PLACE, val_loss_tens, MPI.SUM)
-    val_loss_tens /= float(optim.comm.size)
+    val_loss_tens = hvd.allreduce(val_loss_tens)
     val_loss.val = val_loss_tens.item()
     # sum up the iou_acc
-    optim.comm.Allreduce(MPI.IN_PLACE, iou_acc, MPI.SUM)
+    iou_acc = hvd.allreduce(iou_acc) * hvd.size()
 
     # was_best = False
     if calc_metrics:
         # was_best = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
         _, mean_iu = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
 
-    optim.comm.bcast(mean_iu, root=0)
+    # optim.comm.bcast(mean_iu, root=0)
+    if hvd.rank() != 0:
+        mean_iu = None
     # was_best = optim.comm.bcast(was_best, root=0)
     #
     # # Write out a summary html page and tensorboard image table
@@ -701,5 +690,4 @@ def validate(val_loader, net, criterion, optim, epoch,
 
 
 if __name__ == '__main__':
-    torch.manual_seed(999999999)
     main()
