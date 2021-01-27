@@ -221,6 +221,10 @@ def assert_and_infer_cfg(args, make_immutable=True, train_mode=True):
         elif args.heat:
             __C.MODEL.BN = 'torch-syncnorm'
             __C.MODEL.BNFUNC = torch.nn.SyncBatchNorm
+        elif args.hvd:
+            import horovod.torch as hvd
+            __C.MODEL.BN = 'hvd-syncnorm'
+            __C.MODEL.BNFUNC = hvd.sync_batch_norm.SyncBatchNorm
         else:
             raise Exception('No Support for SyncBN without Apex')
     else:

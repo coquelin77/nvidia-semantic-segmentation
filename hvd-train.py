@@ -310,6 +310,11 @@ def print0(*args, **kwargs):
         print(*args, **kwargs)
 
 
+def save_obj(obj, name):
+    with open(name + ".pkl", "wb") as f:
+        pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)
+
+
 def main():
     """
     Main Function
@@ -476,6 +481,7 @@ def main():
             save_checkpoint(
                 {
                     "epoch": epoch + 1,
+                    "arch" : args.arch,
                     "state_dict": net.state_dict(),
                     "optimizer": optim.state_dict(),
                     "skip_stable": optim.stability.get_dict()
@@ -489,6 +495,8 @@ def main():
         out_dict[nodes + "-val-loss"].append(vls)
         out_dict[nodes + "-val-iou"].append(iu)
         out_dict[nodes + "-val-time"].append(vtt)
+        if args.rank == 0:
+            save_obj(out_dict, fname)
 
     if args.rank == 0:
         print("\nRESULTS\n")

@@ -298,14 +298,20 @@ if args.test_mode:
 
 args.heat = True
 args.world_size = ht.MPI_WORLD.size
-args.rank = rank = ht.MPI_WORLD.rank
+args.rank = ht.MPI_WORLD.rank
+rank = args.rank
 args.global_rank = args.rank
 args.apex = False
 
 
 def print0(*args, **kwargs):
-    if args.rank == 0:
+    if ht.MPI_WORLD.rank == 0:
         print(*args, **kwargs)
+
+
+def save_obj(obj, name):
+    with open(name + ".pkl", "wb") as f:
+        pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)
 
 
 def main():
@@ -489,9 +495,10 @@ def main():
             save_checkpoint(
                 {
                     "epoch": epoch + 1,
+                    "arch": args.arch,
                     "state_dict": htnet.state_dict(),
                     "optimizer": optim.state_dict(),
-                    "skip_stable": optim.stability.get_dict()
+                    "skip_stable": dp_optim.stability.get_dict()
                 }
             )
 
@@ -502,6 +509,9 @@ def main():
         out_dict[nodes + "-val-loss"].append(vls)
         out_dict[nodes + "-val-iou"].append(iu)
         out_dict[nodes + "-val-time"].append(vtt)
+
+        if args.rank == 0:
+            save_obj(out_dict, fname)
 
     if args.rank == 0:
         print("\nRESULTS\n")
@@ -614,6 +624,7 @@ def train(train_loader, net, optim, curr_epoch, scaler):
     if args.benchmarking:
         train_loss_tens = torch.tensor(train_main_loss.avg)
         optim.comm.Allreduce(MPI.IN_PLACE, train_loss_tens, MPI.SUM)
+        train_loss_tens = train_loss_tens.to(torch.float)
         train_loss_tens /= float(optim.comm.size)
         train_main_loss.avg = train_loss_tens.item()
 
@@ -682,6 +693,7 @@ def validate(val_loader, net, criterion, optim, epoch,
     # average the loss value
     val_loss_tens = torch.tensor(val_loss.val)
     optim.comm.Allreduce(MPI.IN_PLACE, val_loss_tens, MPI.SUM)
+    val_loss_tens = val_loss_tens.to(torch.float)
     val_loss_tens /= float(optim.comm.size)
     val_loss.val = val_loss_tens.item()
     # sum up the iou_acc
