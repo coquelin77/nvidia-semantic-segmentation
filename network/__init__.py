@@ -30,13 +30,15 @@ def is_gscnn_arch(args):
     return 'gscnn' in args.arch
 
 
-def wrap_network_in_dataparallel(net, use_apex_data_parallel=False):
+def wrap_network_in_dataparallel(net, use_apex_data_parallel=False, use_torch_ddp=True):
     """
     Wrap the network in Dataparallel
     """
     if use_apex_data_parallel:
         import apex
         net = apex.parallel.DistributedDataParallel(net)
+    elif use_torch_ddp:
+        net = torch.nn.parallel.DistributedDataParallel(net)
     else:
         net = torch.nn.DataParallel(net)
     return net

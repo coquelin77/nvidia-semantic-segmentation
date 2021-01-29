@@ -399,7 +399,7 @@ def main():
     if args.fp16:
         net, optim = amp.initialize(net, optim, opt_level=args.amp_opt_level)
 
-    net = network.wrap_network_in_dataparallel(net, args.apex)
+    net = network.wrap_network_in_dataparallel(net, args.apex, True)
 
     if args.summary:
         print(str(net))

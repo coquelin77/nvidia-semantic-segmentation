@@ -364,7 +364,7 @@ def main():
         args.start_epoch = int(checkpoint['epoch']) + 1
         args.restore_net = True
         args.restore_optimizer = True
-        logx.msg(f"Resuming from: checkpoint={args.resume}, " \
+        logx.msg(f"Resuming from: checkpoint={args.resume}, " 
                  f"epoch {args.start_epoch}, arch {args.arch}")
     elif args.snapshot:
         if 'ASSETS_PATH' in args.snapshot:
@@ -374,17 +374,17 @@ def main():
         args.restore_net = True
         logx.msg(f"Loading weights from: checkpoint={args.snapshot}")
 
-    # todo: HeAT fixes -- urgent -- DDDP / optim / scheduler
     net = network.get_net(args, criterion)
     net = net.to(device)
     # args.lr = (1. / args.world_size * (5 * (args.world_size - 1) / 6.)) * 0.0125 * args.world_size
-    # todo: optim -> direct wrap after this, scheduler stays the same?
     optim, scheduler = get_optimizer(args, net)
 
     # the scheduler in this code is only run at the end of each epoch
+    # todo: make heat an option not this whole file
+    # if args.heat:
     dp_optim = ht.optim.SkipBatches(
-        local_optimizer=optim, 
-        total_epochs=args.max_epoch, 
+        local_optimizer=optim,
+        total_epochs=args.max_epoch,
         max_global_skips=4,
         stablitiy_level=0.05
     )

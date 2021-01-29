@@ -107,7 +107,7 @@ def eval_metrics(iou_acc, args, net, optim, val_loss, epoch, mf_score=None):
 
     iou_per_scale = {}
     iou_per_scale[1.0] = iou_acc
-    if args.apex:
+    if args.amp or args.apex:
         iou_acc_tensor = torch.cuda.FloatTensor(iou_acc)
         torch.distributed.all_reduce(iou_acc_tensor,
                                      op=torch.distributed.ReduceOp.SUM)

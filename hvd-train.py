@@ -431,7 +431,7 @@ def main():
 
     scaler = amp.GradScaler()
 
-    nodes = str(int(hvd.get__size() / torch.cuda.device_count()))
+    nodes = str(int(hvd.size() / torch.cuda.device_count()))
     cwd = os.getcwd()
     fname = cwd + "/" + nodes + "-hvd-citys-benchmark"
     if args.resume and rank == 0 and os.path.isfile(fname + ".pkl"):
@@ -481,7 +481,7 @@ def main():
             save_checkpoint(
                 {
                     "epoch": epoch + 1,
-                    "arch" : args.arch,
+                    "arch": args.arch,
                     "state_dict": net.state_dict(),
                     "optimizer": optim.state_dict(),
                     "skip_stable": optim.stability.get_dict()
