@@ -404,7 +404,10 @@ def main():
         restore_opt(optim, checkpoint)
         dp_optim.stability.load_dict(checkpoint["skip_stable"])
     if args.restore_net:
-        restore_net(net, checkpoint)
+        #restore_net(net, checkpoint)
+        htnet.load_state_dict(checkpoint["state_dict"])
+        #dp_optim.module.load_state_dist(checkpoint["state_dict"])
+    # htnet = ht.nn.DataParallelMultiGPU(net, ht.MPI_WORLD, dp_optim)
 
     if args.init_decoder:
         net.module.init_mods()
