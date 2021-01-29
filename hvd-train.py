@@ -283,9 +283,9 @@ args.best_record = {'epoch': -1, 'iter': 0, 'val_loss': 1e10, 'acc': 0,
 
 # Enable CUDNN Benchmarking optimization
 torch.backends.cudnn.benchmark = True
-if args.deterministic:
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+#if args.deterministic:
+#    torch.backends.cudnn.deterministic = True
+#    torch.backends.cudnn.benchmark = False
 
 # Test Mode run two epochs with a few iterations of training and val
 if args.test_mode:
@@ -295,9 +295,23 @@ args.heat = False
 args.apex = False
 args.hvd = True
 args.world_size = ht.MPI_WORLD.size
-args.rank = rank = ht.MPI_WORLD.rank
+args.rank = ht.MPI_WORLD.rank
 args.global_rank = args.rank
+rank = args.rank
 
+class Metric(object):
+    def __init__(self, name):
+        self.name = name
+        self.sum = torch.tensor(0.)
+        self.n = torch.tensor(0.)
+        self.avg = torch.tensor(0.)
+
+    def update(self, val, n=1):
+        # self.sum += hvd.allreduce(val.detach().cpu(), name=self.name)
+        v = val.detach().cpu() if isinstance(val, torch.Tensor) else val
+        self.sum += v  # al.detach().cpu() * n
+        self.n += n
+        self.avg = self.sum / self.n
 
 def save_checkpoint(state):
     sz = ht.MPI_WORLD.size
@@ -306,7 +320,7 @@ def save_checkpoint(state):
 
 
 def print0(*args, **kwargs):
-    if args.rank == 0:
+    if ht.MPI_WORLD.rank == 0:
         print(*args, **kwargs)
 
 
@@ -324,19 +338,25 @@ def main():
     args.gpus = torch.cuda.device_count()
     device = torch.device("cpu")
     hvd.init()
+
     torch.manual_seed(999999)
+    #if args.cuda:
+    args.cuda = True
+        # Horovod: pin GPU to local rank.
+    torch.cuda.set_device(hvd.local_rank())
+    #torch.cuda.manual_seed(args.seed)
 
     assert args.result_dir is not None, 'need to define result_dir arg'
     logx.initialize(logdir=args.result_dir,
                     tensorboard=True, hparams=vars(args),
                     global_rank=args.global_rank)
-
+    #print("vefore assert and infer")
     # Set up the Arguments, Tensorboard Writer, Dataloader, Loss Fn, Optimizer
     assert_and_infer_cfg(args)
     prep_experiment(args)
     #     args.ngpu = torch.cuda.device_count()
     #     args.best_record = {'mean_iu': -1, 'epoch': 0}
-
+    #print("before datasets / loss")
     train_loader, val_loader, train_obj = datasets.setup_loaders(args)
     criterion, criterion_val = get_loss(args)
 
@@ -362,7 +382,7 @@ def main():
 
     # todo: HeAT fixes -- urgent -- DDDP / optim / scheduler
     net = network.get_net(args, criterion)
-    net = net.to(device)
+    # net = net.to(device)
 
     # todo: optim -> direct wrap after this, scheduler stays the same?
     optim, scheduler = get_optimizer(args, net)
@@ -378,6 +398,7 @@ def main():
         op=hvd.Average,
         gradient_predivide_factor=1.0,  # args.gradient_predivide_factor)
     )
+    #print("after hvd optimizer setup")
 
     if args.summary:
         print(str(net))
@@ -391,20 +412,22 @@ def main():
     if args.restore_optimizer:
         restore_opt(optim, checkpoint)
     if args.restore_net:
+        #net.loat_state_dict(checkpoint["state_dict"])
         restore_net(net, checkpoint)
 
     if args.init_decoder:
         net.module.init_mods()
 
     torch.cuda.empty_cache()
-
-    hvd.broadcast_parameters(net.state_dict(), root_rank=0)
-    hvd.broadcast_optimizer_state(optim, root_rank=0)
+    #print("before parameter broadcasts")
+    #hvd.broadcast_parameters(net.state_dict(), root_rank=0)
+    #hvd.broadcast_optimizer_state(optim, root_rank=0)
 
     if args.start_epoch != 0:
         # TODO: need a loss value for the restart at a certain epoch...
         scheduler.step(args.start_epoch)
-
+    
+    #net = net.cuda()
     # There are 4 options for evaluation:
     #  --eval val                           just run validation
     #  --eval val --dump_assets             dump all images and assets
@@ -429,9 +452,10 @@ def main():
     # elif args.eval is not None:
     #     raise 'unknown eval option {}'.format(args.eval)
 
-    scaler = amp.GradScaler()
+    scaler = None #amp.GradScaler()
+    args.amp = False #True
 
-    nodes = str(int(hvd.get__size() / torch.cuda.device_count()))
+    nodes = str(int(hvd.size() / torch.cuda.device_count()))
     cwd = os.getcwd()
     fname = cwd + "/" + nodes + "-hvd-citys-benchmark"
     if args.resume and rank == 0 and os.path.isfile(fname + ".pkl"):
@@ -484,7 +508,7 @@ def main():
                     "arch" : args.arch,
                     "state_dict": net.state_dict(),
                     "optimizer": optim.state_dict(),
-                    "skip_stable": optim.stability.get_dict()
+                    # "skip_stable": optim.stability.get_dict()
                 }
             )
 
@@ -537,7 +561,7 @@ def train(train_loader, net, optim, curr_epoch, scaler):
     full_bt = time.perf_counter()
     net.train()
 
-    train_main_loss = AverageMeter()
+    train_main_loss = Metric('train_loss')  # AverageMeter()
     start_time = None
     warmup_iter = 10
     optim.last_batch = len(train_loader) - 1
@@ -555,27 +579,33 @@ def train(train_loader, net, optim, curr_epoch, scaler):
         images, gts, scale_float = images.cuda(), gts.cuda(), scale_float.cuda()
         inputs = {'images': images, 'gts': gts}
         optim.zero_grad()
-        if args.amp:
-            with amp.autocast():
-                main_loss = net(inputs)
-                log_main_loss = main_loss.clone().detach_()
-                log_main_loss = hvd.allreduce(log_main_loss)
-                # log_wait = optim.comm.Iallreduce(MPI.IN_PLACE, log_main_loss, MPI.SUM)
-                # log_main_loss = log_main_loss / args.world_size
-            train_main_loss.update(log_main_loss.item(), batch_pixel_size)
-            scaler.scale(main_loss).backward()
-        else:
-            main_loss = net(inputs)
-            main_loss = main_loss.mean()
-            train_main_loss.update(log_main_loss.item(), batch_pixel_size)
-            main_loss.backward()
+        #if args.amp:
+        #    with amp.autocast():
+        #        main_loss = net(inputs)
+        #        log_main_loss = main_loss.clone().detach_()
+        #        log_main_loss = hvd.allreduce(log_main_loss)
+        #        # log_wait = optim.comm.Iallreduce(MPI.IN_PLACE, log_main_loss, MPI.SUM)
+        #        # log_main_loss = log_main_loss / args.world_size
+        #    train_main_loss.update(log_main_loss.item(), batch_pixel_size)
+        #    scaler.scale(main_loss).backward()
+        #else:
+        #print0("before net")
+        main_loss = net(inputs)
+        #main_loss = main_loss.mean()
+        # log_main_loss = main_loss.clone().detach_()
+        log_main_loss = hvd.allreduce(main_loss.clone(), name=train_main_loss.name)
+        train_main_loss.update(log_main_loss, batch_pixel_size)
+        #print0("before backward")
+        main_loss.backward()
 
         # the scaler update is within the optim step
-        if args.amp:
-            scaler.step(optim)
-            scaler.update()
-        else:
-            optim.step()
+        #if args.amp:
+        #    scaler.step(optim)
+        #    scaler.update()
+        #else:
+        #print0("before step")
+        optim.step()
+        #print0("after step")
 
         if i >= warmup_iter:
             curr_time = time.time()
@@ -608,8 +638,8 @@ def train(train_loader, net, optim, curr_epoch, scaler):
         batch_time = time.perf_counter()
 
     if args.benchmarking:
-        train_loss_tens = torch.tensor(train_main_loss.avg)
-        train_loss_tens = hvd.allreduce(train_loss_tens)
+        #train_loss_tens = torch.tensor(train_main_loss.avg)
+        train_loss_tens = hvd.allreduce(train_main_loss.avg.clone(), name=train_main_loss.name)
         # train_loss_tens /= float(optim.comm.size)
         train_main_loss.avg = train_loss_tens.item()
 
@@ -643,7 +673,7 @@ def validate(val_loader, net, criterion, optim, epoch,
     )
 
     net.eval()
-    val_loss = AverageMeter()
+    val_loss = Metric('vald_loss')  # AverageMeter()
     iou_acc = 0
     for val_idx, data in enumerate(val_loader):
         input_images, labels, img_names, _ = data
@@ -663,7 +693,7 @@ def validate(val_loader, net, criterion, optim, epoch,
 
         input_images, labels, img_names, _ = data
 
-        if optim.comm.rank == 0:
+        if hvd.rank() == 0:
             dumper.dump({'gt_images': labels,
                          'input_images': input_images,
                          'img_names': img_names,
@@ -672,15 +702,15 @@ def validate(val_loader, net, criterion, optim, epoch,
         if val_idx > 5 and args.test_mode:
             break
 
-        if val_idx % 2 == 0 and optim.comm.rank == 0:
+        if val_idx % 2 == 0 and hvd.rank() == 0:
             logx.msg(f'validating[Iter: {val_idx + 1} / {len(val_loader)}]')
 
     # average the loss value
-    val_loss_tens = torch.tensor(val_loss.val)
-    val_loss_tens = hvd.allreduce(val_loss_tens)
-    val_loss.val = val_loss_tens.item()
+    val_loss_tens = val_loss.avg.clone()
+    val_loss_tens = hvd.allreduce(val_loss_tens.clone(), name=val_loss.name)
+    val_loss.avg = val_loss_tens.item()
     # sum up the iou_acc
-    iou_acc = hvd.allreduce(iou_acc) * hvd.size()
+    iou_acc = hvd.allreduce(torch.tensor(iou_acc), name=val_loss.name) * hvd.size()
 
     # was_best = False
     if calc_metrics:
@@ -695,7 +725,7 @@ def validate(val_loader, net, criterion, optim, epoch,
     # # Write out a summary html page and tensorboard image table
     # if not args.dump_for_auto_labelling and not args.dump_for_submission and optim.comm.rank == 0:
     #     dumper.write_summaries(was_best)
-    return val_loss.val, mean_iu, time.perf_counter() - val_time
+    return val_loss.avg, mean_iu, time.perf_counter() - val_time
 
 
 if __name__ == '__main__':
