@@ -273,15 +273,15 @@ parser.add_argument(
     default=False,
     help="if true, this will save the loss values and accuracy values to a csv file"
 )
-parser.add_argument(
-    "--no-cycling", action="store_true", help="stop the cycling of the DASO optimizer"
-)
-parser.add_argument(
-    "--batch-skip", type=int, default=4, help="number of batches to skip between global syncs"
-)
-parser.add_argument(
-    "--gs", "--global-send-delay", type=int, default=1, help="number of batches to wait before receiving global params" 
-)
+#parser.add_argument(
+#    "--no-cycling", action="store_true", help="stop the cycling of the DASO optimizer"
+#)
+#parser.add_argument(
+#    "--batch-skip", type=int, default=4, help="number of batches to skip between global syncs"
+#)
+#parser.add_argument(
+#    "--gs", "--global-send-delay", type=int, default=1, help="number of batches to wait before receiving global params" 
+#)
 
 
 args = parser.parse_args()
@@ -338,11 +338,11 @@ def main():
     args.local_rank = loc_rank
     if loc_dist:
         device = "cuda:" + str(loc_rank)
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "19500"
-        os.environ["NCCL_SOCKET_IFNAME"] = "ib"
+        #os.environ["MASTER_ADDR"] = "localhost"
+        #os.environ["MASTER_PORT"] = "19500"
+        #os.environ["NCCL_SOCKET_IFNAME"] = "ib"
         torch.cuda.set_device(device)
-        torch.distributed.init_process_group(backend="nccl", rank=loc_rank, world_size=args.gpus)
+        #torch.distributed.init_process_group(backend="nccl", rank=loc_rank, world_size=args.gpus)
         # torch.cuda.set_device(device)
     elif args.gpus == 1:
         args.gpus = torch.cuda.device_count()
@@ -392,18 +392,27 @@ def main():
     # the scheduler in this code is only run at the end of each epoch
     # todo: make heat an option not this whole file
     # if args.heat:
-    dp_optim = ht.optim.DASO(
-        local_optimizer=optim,
-        total_epochs=args.max_epoch,
-        max_global_skips=4,
-    )
+    #dp_optim = ht.optim.DASO(
+    #    local_optimizer=optim,
+    #    total_epochs=args.max_epoch,
+    #    max_global_skips=4,
+    #)
     #if args.no_cycling:
-    dp_optim.disable_cycling(
-        global_skips=args.batch_skip,
-        batches_to_wait=args.gs
-    )
+    #dp_optim.disable_cycling(
+    #    global_skips=args.batch_skip,
+    #    batches_to_wait=args.gs
+    #)
     # this is where the network is wrapped with DDDP (w/apex) or DP
-    htnet = ht.nn.DataParallelMultiGPU(net, comm=ht.MPI_WORLD, optimizer=dp_optim)
+    #htnet = ht.nn.DataParallelMultiGPU(net, comm=ht.MPI_WORLD, optimizer=dp_optim)
+    #optimizer = torch.optim.SGD(
+    #    model.parameters(), args.lr, momentum=args.momentum, weight_decay=args.weight_decay
+    #)
+
+    blocking = False  # choose blocking or non-blocking parameter updates
+    dp_optim = ht.optim.dp_optimizer.DataParallelOptimizer(optim, blocking)
+    htnet = ht.nn.DataParallel(
+        net, ht.MPI_WORLD, dp_optim, blocking_parameter_updates=blocking
+    )
 
     if args.summary:
         print(str(net))
@@ -416,7 +425,7 @@ def main():
 
     if args.restore_optimizer:
         restore_opt(optim, checkpoint)
-        dp_optim.stability.load_dict(checkpoint["skip_stable"])
+        #dp_optim.stability.load_dict(checkpoint["skip_stable"])
     if args.restore_net:
         #restore_net(net, checkpoint)
         htnet.load_state_dict(checkpoint["state_dict"])
@@ -457,11 +466,11 @@ def main():
         raise 'unknown eval option {}'.format(args.eval)
 
     scaler = amp.GradScaler()
-    if dp_optim.comm.rank == 0:
+    if htnet.comm.rank == 0:
         print("scheduler", args.lr_schedule)
-    dp_optim.add_scaler(scaler)
+    #dp_optim.add_scaler(scaler)
 
-    nodes = str(int(dp_optim.comm.size / torch.cuda.device_count()))
+    nodes = str(int(htnet.comm.size / torch.cuda.device_count()))
     cwd = os.getcwd()
     fname = cwd + "/" + nodes + "-heat-citys-benchmark"
     if args.resume and rank == 0 and os.path.isfile(fname + ".pkl"):
@@ -497,12 +506,12 @@ def main():
             pass
 
         ls, bt, btt = train(train_loader, htnet, dp_optim, epoch, scaler)
-        dp_optim.epoch_loss_logic(ls, loss_globally_averaged=True)
+        #dp_optim.epoch_loss_logic(ls, loss_globally_averaged=True)
 
         # if epoch % args.val_freq == 0:
         vls, iu, vtt = validate(val_loader, htnet, criterion_val, dp_optim, epoch)
         if args.lr_schedule == "plateau":
-            if dp_optim.comm.rank == 0:
+            if htnet.comm.rank == 0:
                 print("loss", ls, 'best:', scheduler.best * (1. - scheduler.threshold), scheduler.num_bad_epochs)
             scheduler.step(ls)  # val_loss)
         else:
@@ -515,7 +524,7 @@ def main():
                     "arch": args.arch,
                     "state_dict": htnet.state_dict(),
                     "optimizer": optim.state_dict(),
-                    "skip_stable": dp_optim.stability.get_dict()
+                    #"skip_stable": dp_optim.stability.get_dict()
                 }
             )
 
@@ -553,7 +562,7 @@ def lr_warmup(optimizer, epoch, bn, len_epoch, max_lr=0.4):
         return
 
     args.lr = max_lr * lr_adjust
-    for param_group in optimizer.local_optimizer.param_groups:
+    for param_group in optimizer.torch_optimizer.param_groups:
         param_group["lr"] = args.lr
 
 
@@ -572,7 +581,7 @@ def train(train_loader, net, optim, curr_epoch, scaler):
     train_main_loss = AverageMeter()
     start_time = None
     warmup_iter = 10
-    optim.last_batch = len(train_loader) - 1
+    #optim.last_batch = len(train_loader) - 1
     btimes = []
     batch_time = time.perf_counter()
     for i, data in enumerate(train_loader):
@@ -593,7 +602,7 @@ def train(train_loader, net, optim, curr_epoch, scaler):
                 log_main_loss = main_loss.clone().detach_()
                 # torch.distributed.all_reduce(log_main_loss,
                 #                              torch.distributed.ReduceOp.SUM)
-                log_wait = optim.comm.Iallreduce(MPI.IN_PLACE, log_main_loss, MPI.SUM)
+                log_wait = htnet.comm.Iallreduce(MPI.IN_PLACE, log_main_loss, MPI.SUM)
                 # log_main_loss = log_main_loss / args.world_size
             # train_main_loss.update(log_main_loss.item(), batch_pixel_size)
             scaler.scale(main_loss).backward()
@@ -605,8 +614,12 @@ def train(train_loader, net, optim, curr_epoch, scaler):
             #train_main_loss.update(log_main_loss.item(), batch_pixel_size)
             main_loss.backward()
 
-        # the scaler update is within the optim step
-        optim.step()
+        # the scaler update is within the optim step -> only in DASO
+        #optim.step()
+        scaler.step(optimizer)
+
+        # Updates the scale for next iteration.
+        scaler.update()
 
         if i >= warmup_iter:
             curr_time = time.time()
@@ -624,11 +637,11 @@ def train(train_loader, net, optim, curr_epoch, scaler):
                ' [lr {:0.6f}] [batchtime {:0.3g}]')
         msg = msg.format(
             curr_epoch, i + 1, len(train_loader), train_main_loss.avg,
-            optim.local_optimizer.param_groups[-1]['lr'], batchtime)
+            optim.torch_optimizer.param_groups[-1]['lr'], batchtime)
         logx.msg(msg)
 
         metrics = {'loss': train_main_loss.avg,
-                   'lr': optim.local_optimizer.param_groups[-1]['lr']}
+                   'lr': optim.torch_optimizer.param_groups[-1]['lr']}
         curr_iter = curr_epoch * len(train_loader) + i
         logx.metric('train', metrics, curr_iter)
 
@@ -642,7 +655,7 @@ def train(train_loader, net, optim, curr_epoch, scaler):
         train_loss_tens = torch.tensor(train_main_loss.avg)
         optim.comm.Allreduce(MPI.IN_PLACE, train_loss_tens, MPI.SUM)
         train_loss_tens = train_loss_tens.to(torch.float)
-        train_loss_tens /= float(optim.comm.size)
+        train_loss_tens /= float(htnet.comm.size)
         train_main_loss.avg = train_loss_tens.item()
 
     return train_main_loss.avg, torch.mean(torch.tensor(btimes)), time.perf_counter() - full_bt
@@ -709,19 +722,19 @@ def validate(val_loader, net, criterion, optim, epoch,
 
     # average the loss value
     val_loss_tens = torch.tensor(val_loss.val)
-    optim.comm.Allreduce(MPI.IN_PLACE, val_loss_tens, MPI.SUM)
+    htnet.comm.Allreduce(MPI.IN_PLACE, val_loss_tens, MPI.SUM)
     val_loss_tens = val_loss_tens.to(torch.float)
     val_loss_tens /= float(optim.comm.size)
     val_loss.val = val_loss_tens.item()
     # sum up the iou_acc
-    optim.comm.Allreduce(MPI.IN_PLACE, iou_acc, MPI.SUM)
+    htnet.comm.Allreduce(MPI.IN_PLACE, iou_acc, MPI.SUM)
 
     # was_best = False
     if calc_metrics:
         # was_best = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
         _, mean_iu = eval_metrics(iou_acc, args, net, optim, val_loss, epoch)
 
-    optim.comm.bcast(mean_iu, root=0)
+    htnet.comm.bcast(mean_iu, root=0)
     # was_best = optim.comm.bcast(was_best, root=0)
     #
     # # Write out a summary html page and tensorboard image table
